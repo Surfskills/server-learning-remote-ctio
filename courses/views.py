@@ -1,3 +1,4 @@
+# views.py
 from rest_framework import viewsets, generics, status, permissions
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -5,25 +6,19 @@ from rest_framework.decorators import action
 from django.db.models import Q, Prefetch
 from django.shortcuts import get_object_or_404
 
-from .models import Course, CourseCategory, CourseSection, Lecture, LectureResource
+from .models import (
+    Course, CourseCategory, CourseSection, Lecture, LectureResource,
+    QaItem, ProjectTool, Quiz, QuizQuestion, QuizTask
+)
 from .serializers import (
-    CourseSerializer,
-    CourseCategorySerializer,
-    CourseSectionSerializer,
-    LectureSerializer,
-    LectureResourceSerializer,
-    LectureCreateSerializer,
-    AdminCourseSerializer
+    CourseSerializer, CourseCategorySerializer, CourseSectionSerializer,
+    LectureSerializer, LectureResourceSerializer, LectureCreateSerializer,
+    AdminCourseSerializer, QaItemSerializer, ProjectToolSerializer,
+    QuizSerializer, QuizQuestionSerializer, QuizTaskSerializer
 )
 from core.views import BaseModelViewSet
 from core.utils import success_response, error_response
-from core.permissions import (
-    IsAdminUser,
-    IsInstructor,
-
-    IsAdminOrCourseInstructor,
-    CanAccessCourseContent
-)
+from core.permissions import IsAdminUser, IsInstructor, IsAdminOrCourseInstructor, CanAccessCourseContent
 from authentication.models import User
 
 
@@ -263,7 +258,9 @@ class LectureViewSet(BaseModelViewSet):
 
     def get_queryset(self):
         section_id = self.kwargs.get('section_pk')
-        return Lecture.objects.filter(section_id=section_id).order_by('order')
+        return Lecture.objects.filter(section_id=section_id).prefetch_related(
+            'resources', 'qa_items', 'project_tools', 'quizzes__questions', 'quizzes__tasks'
+        ).order_by('order')
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -275,6 +272,44 @@ class LectureViewSet(BaseModelViewSet):
         last_lecture = Lecture.objects.filter(section=section).order_by('-order').first()
         new_order = (last_lecture.order + 1) if last_lecture else 1
         serializer.save(section=section, order=new_order)
+
+    @action(detail=True, methods=['post'])
+    def add_qa(self, request, pk=None, section_pk=None):
+        lecture = self.get_object()
+        serializer = QaItemSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            serializer.save(lecture=lecture, asked_by=request.user)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'])
+    def add_project_tool(self, request, pk=None, section_pk=None):
+        lecture = self.get_object()
+        serializer = ProjectToolSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save(lecture=lecture)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'])
+    def create_quiz(self, request, pk=None, section_pk=None):
+        lecture = self.get_object()
+        serializer = QuizSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            serializer.save(
+                lecture=lecture,
+                section=lecture.section,
+                course=lecture.section.course
+            )
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['get'])
+    def quiz(self, request, pk=None, section_pk=None):
+        lecture = self.get_object()
+        quiz = get_object_or_404(Quiz, lecture=lecture)
+        serializer = QuizSerializer(quiz, context={'request': request})
+        return Response(serializer.data)
 
     @action(detail=True, methods=['post'])
     def reorder(self, request, pk=None, section_pk=None):
@@ -291,7 +326,179 @@ class LectureViewSet(BaseModelViewSet):
         except Exception as e:
             return error_response(str(e), status_code=status.HTTP_400_BAD_REQUEST)
 
+class LectureResourceViewSet(BaseModelViewSet):
+    serializer_class = LectureResourceSerializer
+    permission_classes = [IsAuthenticated, CanAccessCourseContent]
 
+    def get_queryset(self):
+        lecture_id = self.kwargs.get('lecture_pk')
+        return LectureResource.objects.filter(lecture_id=lecture_id)
+
+    def perform_create(self, serializer):
+        lecture = get_object_or_404(Lecture, pk=self.kwargs.get('lecture_pk'))
+        serializer.save(lecture=lecture)
+
+class QaItemViewSet(BaseModelViewSet):
+    serializer_class = QaItemSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        lecture_id = self.kwargs.get('lecture_pk')
+        return QaItem.objects.filter(lecture_id=lecture_id).select_related('asked_by')
+
+    def perform_create(self, serializer):
+        lecture = get_object_or_404(Lecture, pk=self.kwargs.get('lecture_pk'))
+        serializer.save(lecture=lecture, asked_by=self.request.user)
+
+    @action(detail=True, methods=['post'])
+    def upvote(self, request, pk=None, lecture_pk=None):
+        qa_item = self.get_object()
+        qa_item.upvotes += 1
+        qa_item.save()
+        return Response({'upvotes': qa_item.upvotes})
+
+    @action(detail=True, methods=['post'])
+    def resolve(self, request, pk=None, lecture_pk=None):
+        qa_item = self.get_object()
+        qa_item.resolved = True
+        qa_item.save()
+        return Response({'resolved': qa_item.resolved})
+
+class ProjectToolViewSet(BaseModelViewSet):
+    serializer_class = ProjectToolSerializer
+    permission_classes = [IsAuthenticated, CanAccessCourseContent]
+
+    def get_queryset(self):
+        lecture_id = self.kwargs.get('lecture_pk')
+        return ProjectTool.objects.filter(lecture_id=lecture_id)
+
+    def perform_create(self, serializer):
+        lecture = get_object_or_404(Lecture, pk=self.kwargs.get('lecture_pk'))
+        serializer.save(lecture=lecture)
+
+class QuizViewSet(BaseModelViewSet):
+    serializer_class = QuizSerializer
+    permission_classes = [IsAuthenticated, CanAccessCourseContent]
+
+    def get_queryset(self):
+        lecture_id = self.kwargs.get('lecture_pk', None)
+        section_id = self.kwargs.get('section_pk', None)
+        course_id = self.kwargs.get('course_pk', None)
+        
+        if lecture_id:
+            return Quiz.objects.filter(lecture_id=lecture_id).prefetch_related('questions', 'tasks')
+        elif section_id:
+            return Quiz.objects.filter(section_id=section_id).prefetch_related('questions', 'tasks')
+        elif course_id:
+            return Quiz.objects.filter(course_id=course_id).prefetch_related('questions', 'tasks')
+        return Quiz.objects.none()
+
+    def get_object(self):
+        """Override get_object to handle one-to-one relationship with lecture"""
+        lecture_id = self.kwargs.get('lecture_pk', None)
+        section_id = self.kwargs.get('section_pk', None)
+        course_id = self.kwargs.get('course_pk', None)
+        
+        try:
+            if lecture_id:
+                lecture = get_object_or_404(Lecture, pk=lecture_id)
+                return get_object_or_404(Quiz, lecture=lecture)
+            elif section_id:
+                section = get_object_or_404(CourseSection, pk=section_id)
+                return get_object_or_404(Quiz, section=section)
+            elif course_id:
+                course = get_object_or_404(Course, pk=course_id)
+                return get_object_or_404(Quiz, course=course)
+            else:
+                from django.http import Http404
+                raise Http404("Quiz not found")
+        except Quiz.DoesNotExist:
+            from django.http import Http404
+            raise Http404("Quiz not found")
+
+    def perform_create(self, serializer):
+        lecture_id = self.kwargs.get('lecture_pk', None)
+        section_id = self.kwargs.get('section_pk', None)
+        course_id = self.kwargs.get('course_pk', None)
+        
+        if lecture_id:
+            lecture = get_object_or_404(Lecture, pk=lecture_id)
+            # Check if quiz already exists for this lecture
+            if Quiz.objects.filter(lecture=lecture).exists():
+                from rest_framework.exceptions import ValidationError
+                raise ValidationError("Quiz already exists for this lecture")
+            
+            serializer.save(
+                lecture=lecture,
+                section=lecture.section,
+                course=lecture.section.course
+            )
+        elif section_id:
+            section = get_object_or_404(CourseSection, pk=section_id)
+            # Check if quiz already exists for this section
+            if Quiz.objects.filter(section=section).exists():
+                from rest_framework.exceptions import ValidationError
+                raise ValidationError("Quiz already exists for this section")
+            
+            serializer.save(
+                section=section,
+                course=section.course
+            )
+        elif course_id:
+            course = get_object_or_404(Course, pk=course_id)
+            # Check if quiz already exists for this course
+            if Quiz.objects.filter(course=course).exists():
+                from rest_framework.exceptions import ValidationError
+                raise ValidationError("Quiz already exists for this course")
+            
+            serializer.save(course=course)
+
+class QuizQuestionViewSet(BaseModelViewSet):
+    serializer_class = QuizQuestionSerializer
+    permission_classes = [IsAuthenticated, CanAccessCourseContent]
+
+    def get_queryset(self):
+        lecture_id = self.kwargs.get('lecture_pk')
+        try:
+            lecture = get_object_or_404(Lecture, pk=lecture_id)
+            quiz = get_object_or_404(Quiz, lecture=lecture)
+            return QuizQuestion.objects.filter(quiz=quiz).order_by('order')
+        except Quiz.DoesNotExist:
+            return QuizQuestion.objects.none()
+
+    def perform_create(self, serializer):
+        lecture_id = self.kwargs.get('lecture_pk')
+        lecture = get_object_or_404(Lecture, pk=lecture_id)
+        quiz = get_object_or_404(Quiz, lecture=lecture)
+        
+        last_question = QuizQuestion.objects.filter(quiz=quiz).order_by('-order').first()
+        new_order = (last_question.order + 1) if last_question else 1
+        serializer.save(quiz=quiz, order=new_order)
+
+
+class QuizTaskViewSet(BaseModelViewSet):
+    serializer_class = QuizTaskSerializer
+    permission_classes = [IsAuthenticated, CanAccessCourseContent]
+
+    def get_queryset(self):
+        lecture_id = self.kwargs.get('lecture_pk')
+        try:
+            lecture = get_object_or_404(Lecture, pk=lecture_id)
+            quiz = get_object_or_404(Quiz, lecture=lecture)
+            return QuizTask.objects.filter(quiz=quiz).order_by('order')
+        except Quiz.DoesNotExist:
+            return QuizTask.objects.none()
+
+    def perform_create(self, serializer):
+        lecture_id = self.kwargs.get('lecture_pk')
+        lecture = get_object_or_404(Lecture, pk=lecture_id)
+        quiz = get_object_or_404(Quiz, lecture=lecture)
+        
+        last_task = QuizTask.objects.filter(quiz=quiz).order_by('-order').first()
+        new_order = (last_task.order + 1) if last_task else 1
+        serializer.save(quiz=quiz, order=new_order)
+
+        
 class LectureResourceViewSet(BaseModelViewSet):
     serializer_class = LectureResourceSerializer
     permission_classes = [IsAuthenticated, CanAccessCourseContent]

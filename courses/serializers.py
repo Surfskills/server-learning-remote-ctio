@@ -1,5 +1,7 @@
 from rest_framework import serializers
-from .models import Course, CourseCategory, CourseSection, Lecture, LectureResource
+
+
+from .models import Course, CourseCategory, CourseSection, Lecture, LectureResource, ProjectTool, QaItem, Quiz, QuizQuestion, QuizTask
 from authentication.models import User
 
 class UserSerializer(serializers.ModelSerializer):
@@ -17,6 +19,122 @@ class InstructorSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ['id', 'first_name', 'last_name', 'profile_picture']
+
+class QuizQuestionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QuizQuestion
+        fields = '__all__'
+        read_only_fields = ['quiz', 'order']
+
+class QuizTaskSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QuizTask
+        fields = '__all__'
+        read_only_fields = ['quiz', 'order']
+
+class QuizSerializer(serializers.ModelSerializer):
+    questions = QuizQuestionSerializer(many=True, read_only=True)
+    tasks = QuizTaskSerializer(many=True, read_only=True)
+    
+    class Meta:
+        model = Quiz
+        fields = '__all__'
+        read_only_fields = ['course', 'section', 'lecture']
+
+class QaItemSerializer(serializers.ModelSerializer):
+    asked_by = UserSerializer(read_only=True)
+    
+    class Meta:
+        model = QaItem
+        fields = '__all__'
+        read_only_fields = ['lecture', 'asked_by', 'upvotes']
+
+class ProjectToolSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProjectTool
+        fields = '__all__'
+        read_only_fields = ['lecture']
+
+class LectureResourceSerializer(serializers.ModelSerializer):
+    resource_type = serializers.CharField(source='kind')
+    file_url = serializers.URLField(source='url', required=False)
+    external_url = serializers.URLField(source='url', required=False)
+    
+    class Meta:
+        model = LectureResource
+        fields = [
+            'id', 'title', 'resource_type', 'kind', 'url', 'file_url', 
+            'external_url', 'provider', 'duration_seconds', 'is_downloadable', 
+            'file_size', 'mime_type', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['lecture', 'created_at', 'updated_at']
+
+    def create(self, validated_data):
+        if 'kind' in validated_data:
+            validated_data['kind'] = validated_data.get('kind', validated_data.get('resource_type'))
+        if 'url' in validated_data:
+            validated_data['url'] = validated_data.get('url', validated_data.get('file_url') or validated_data.get('external_url'))
+        return super().create(validated_data)
+
+class LectureSerializer(serializers.ModelSerializer):
+    resources = LectureResourceSerializer(many=True, read_only=True)
+    qa_items = QaItemSerializer(many=True, read_only=True)
+    project_tools = ProjectToolSerializer(many=True, read_only=True)
+    quiz = QuizSerializer(read_only=True)
+    is_completed = serializers.SerializerMethodField()
+    video_url = serializers.URLField(required=False, allow_blank=True)
+    description = serializers.CharField(source='overview', required=False, allow_blank=True, allow_null=True, default='')
+    previewAvailable = serializers.BooleanField(source='preview_available', read_only=True)
+
+    class Meta:
+        model = Lecture
+        fields = [
+            'id', 'title', 'order', 'duration', 'overview', 'description',
+            'preview_available', 'previewAvailable', 'video_url', 'resources',
+            'is_completed', 'created_at', 'updated_at', 'qa_items', 'project_tools', 'quiz'
+        ]
+        read_only_fields = ['section', 'order', 'created_at', 'updated_at']
+
+    def get_is_completed(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            try:
+                from enrollments.models import Enrollment
+                enrollment = Enrollment.objects.filter(
+                    student=request.user,
+                    course=obj.section.course
+                ).first()
+                if enrollment and hasattr(enrollment, 'progress'):
+                    return enrollment.progress.completed_lectures.filter(id=obj.id).exists()
+            except ImportError:
+                pass
+        return False
+
+class LectureCreateSerializer(serializers.ModelSerializer):
+    description = serializers.CharField(source='overview', required=False, allow_blank=True)
+    video_url = serializers.URLField(required=False, allow_blank=True)
+    quiz = QuizSerializer(required=False) 
+    
+    class Meta:
+        model = Lecture
+        fields = ['title', 'duration', 'overview', 'description', 'preview_available', 'video_url', 'quiz']
+
+    def create(self, validated_data):
+        quiz_data = validated_data.pop('quiz', None)
+        section_id = self.context['view'].kwargs.get('section_pk')
+        
+        lecture = super().create(validated_data)
+        
+        if quiz_data:
+            quiz_data['lecture'] = lecture.id
+            quiz_data['section'] = lecture.section.id
+            quiz_data['course'] = lecture.section.course.id
+            
+            quiz_serializer = QuizSerializer(data=quiz_data, context=self.context)
+            if quiz_serializer.is_valid():
+                quiz_serializer.save()
+        
+        return lecture
 
 class CourseSerializer(serializers.ModelSerializer):
     instructor = InstructorSerializer(read_only=True)
@@ -140,76 +258,7 @@ class CourseSectionSerializer(serializers.ModelSerializer):
     def get_lectures_count(self, obj):
         return obj.lectures.count()
 
-class LectureResourceSerializer(serializers.ModelSerializer):
-    # Map frontend field names to backend field names
-    resource_type = serializers.CharField(source='kind')
-    file_url = serializers.URLField(source='url', required=False)
-    external_url = serializers.URLField(source='url', required=False)
-    
-    class Meta:
-        model = LectureResource
-        fields = [
-            'id', 'title', 'resource_type', 'kind', 'url', 'file_url', 
-            'external_url', 'provider', 'duration_seconds', 'is_downloadable', 
-            'file_size', 'mime_type', 'created_at', 'updated_at'
-        ]
-        read_only_fields = ['lecture', 'created_at', 'updated_at']
 
-    def create(self, validated_data):
-        # Handle the mapping between frontend and backend field names
-        if 'kind' in validated_data:
-            validated_data['kind'] = validated_data.get('kind', validated_data.get('resource_type'))
-        if 'url' in validated_data:
-            validated_data['url'] = validated_data.get('url', validated_data.get('file_url') or validated_data.get('external_url'))
-        
-        return super().create(validated_data)
-
-class LectureSerializer(serializers.ModelSerializer):
-    resources = LectureResourceSerializer(many=True, read_only=True)
-    is_completed = serializers.SerializerMethodField()
-    # Add fields expected by frontend
-    video_url = serializers.URLField(required=False, allow_blank=True)
-    description = serializers.CharField(source='overview', required=False, allow_blank=True)
-    previewAvailable = serializers.BooleanField(source='preview_available', read_only=True)
-
-    class Meta:
-        model = Lecture
-        fields = [
-            'id', 'title', 'order', 'duration', 'overview', 'description',
-            'preview_available', 'previewAvailable', 'video_url', 'resources', 
-            'is_completed', 'created_at', 'updated_at'
-        ]
-        read_only_fields = ['section', 'order', 'created_at', 'updated_at']
-
-    def get_is_completed(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            try:
-                from enrollments.models import Enrollment
-                enrollment = Enrollment.objects.filter(
-                    student=request.user,
-                    course=obj.section.course
-                ).first()
-                if enrollment and hasattr(enrollment, 'progress'):
-                    return enrollment.progress.completed_lectures.filter(id=obj.id).exists()
-            except ImportError:
-                pass
-        return False
-
-class LectureCreateSerializer(serializers.ModelSerializer):
-    description = serializers.CharField(source='overview', required=False, allow_blank=True)
-    video_url = serializers.URLField(required=False, allow_blank=True)
-    
-    class Meta:
-        model = Lecture
-        fields = ['title', 'duration', 'overview', 'description', 'preview_available', 'video_url']
-
-    def create(self, validated_data):
-        section_id = self.context['view'].kwargs.get('section_pk')
-        last_lecture = Lecture.objects.filter(section_id=section_id).order_by('-order').first()
-        validated_data['order'] = (last_lecture.order + 1) if last_lecture else 1
-        validated_data['section_id'] = section_id
-        return super().create(validated_data)
 
 # Additional serializers for detailed responses
 class CourseDetailSerializer(CourseSerializer):

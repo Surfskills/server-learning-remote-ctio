@@ -77,7 +77,7 @@ INSTALLED_APPS = [
     # 'core_system',
     'core',
     'users.apps.UsersConfig',
-    'assessments',
+    # 'assessments',
     # 'content',
     'courses',
     'enrollments',

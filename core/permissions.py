@@ -62,13 +62,29 @@ class IsAdminOrCourseInstructor(BasePermission):
                 
         return True  # Allow other actions if they pass object permissions
 
+
 class IsCourseInstructor(BasePermission):
     """
     Allows access only if user is the instructor of the course.
     """
     def has_object_permission(self, request, view, obj):
+        if obj is None:
+            return False
         return obj.instructor == request.user
-
+    
+    def has_course_permission_by_id(self, request, course_id):
+        """
+        Check if user is instructor of a course by course ID.
+        """
+        if not request.user or not request.user.is_authenticated:
+            return False
+            
+        try:
+            from courses.models import Course
+            course = Course.objects.get(id=course_id)
+            return course.instructor == request.user
+        except Course.DoesNotExist:
+            return False
 
 
 class IsEnrolledStudent(BasePermission):
@@ -128,6 +144,22 @@ class IsCourseEnrolled(BasePermission):
             ).exists()
         
         return True
+
+
+class IsInstructorOrAdmin(BasePermission):
+    """
+    Allows access to instructors or admin users.
+    """
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        
+        # Admin users have full access
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+        
+        # Check if user is an instructor
+        return getattr(request.user, 'user_type', None) == 'INSTRUCTOR'
 
 
 class CanAccessCourseContent(BasePermission):

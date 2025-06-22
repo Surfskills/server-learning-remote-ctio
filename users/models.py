@@ -1,8 +1,9 @@
 from django.db import models
-from django.contrib.auth import get_user_model
+
+from authentication.models import User
 from core.models import BaseModel
 
-User = get_user_model()
+
 
 class UserProfile(BaseModel):
     """

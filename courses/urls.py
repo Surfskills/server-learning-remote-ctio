@@ -1,21 +1,16 @@
-# courses/urls.py
+# urls.py
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from . import views
 
-# Main router for admin and categories only
 router = DefaultRouter()
 router.register(r'admin/courses', views.AdminCourseViewSet, basename='admin-course')
 router.register(r'course-categories', views.CourseCategoryViewSet, basename='category')
 
 urlpatterns = [
-    # Include router URLs
     path('', include(router.urls)),
-    
-    # Course-specific views
     path('search/', views.CourseSearchView.as_view(), name='course-search'),
     
-    # Main course endpoints (manually registered to avoid conflicts)
     path('courses/', views.CourseViewSet.as_view({
         'get': 'list',
         'post': 'create'
@@ -28,7 +23,7 @@ urlpatterns = [
         'delete': 'destroy'
     }), name='course-detail'),
     
-    # Manual nested URLs for sections
+    # Sections
     path('courses/<uuid:course_pk>/sections/', 
          views.CourseSectionViewSet.as_view({
              'get': 'list', 
@@ -49,7 +44,7 @@ urlpatterns = [
          views.CourseSectionViewSet.as_view({'post': 'reorder'}), 
          name='course-section-reorder'),
     
-    # Manual nested URLs for lectures
+    # Lectures
     path('courses/<uuid:course_pk>/sections/<uuid:section_pk>/lectures/', 
          views.LectureViewSet.as_view({
              'get': 'list', 
@@ -70,7 +65,7 @@ urlpatterns = [
          views.LectureViewSet.as_view({'post': 'reorder'}), 
          name='section-lecture-reorder'),
     
-    # Manual nested URLs for lecture resources
+    # Lecture resources
     path('courses/<uuid:course_pk>/sections/<uuid:section_pk>/lectures/<uuid:lecture_pk>/resources/', 
          views.LectureResourceViewSet.as_view({
              'get': 'list', 
@@ -86,33 +81,94 @@ urlpatterns = [
              'delete': 'destroy'
          }), 
          name='lecture-resource-detail'),
+    
+    # Q&A
+    path('courses/<uuid:course_pk>/sections/<uuid:section_pk>/lectures/<uuid:lecture_pk>/qa/', 
+         views.QaItemViewSet.as_view({
+             'get': 'list', 
+             'post': 'create'
+         }), 
+         name='lecture-qa-list'),
+    
+    path('courses/<uuid:course_pk>/sections/<uuid:section_pk>/lectures/<uuid:lecture_pk>/qa/<uuid:pk>/', 
+         views.QaItemViewSet.as_view({
+             'get': 'retrieve', 
+             'put': 'update', 
+             'patch': 'partial_update', 
+             'delete': 'destroy'
+         }), 
+         name='lecture-qa-detail'),
+    
+    path('courses/<uuid:course_pk>/sections/<uuid:section_pk>/lectures/<uuid:lecture_pk>/qa/<uuid:pk>/upvote/', 
+         views.QaItemViewSet.as_view({'post': 'upvote'}), 
+         name='lecture-qa-upvote'),
+    
+    path('courses/<uuid:course_pk>/sections/<uuid:section_pk>/lectures/<uuid:lecture_pk>/qa/<uuid:pk>/resolve/', 
+         views.QaItemViewSet.as_view({'post': 'resolve'}), 
+         name='lecture-qa-resolve'),
+    
+    # Project tools
+    path('courses/<uuid:course_pk>/sections/<uuid:section_pk>/lectures/<uuid:lecture_pk>/project-tools/', 
+         views.ProjectToolViewSet.as_view({
+             'get': 'list', 
+             'post': 'create'
+         }), 
+         name='lecture-project-tools-list'),
+    
+    path('courses/<uuid:course_pk>/sections/<uuid:section_pk>/lectures/<uuid:lecture_pk>/project-tools/<uuid:pk>/', 
+         views.ProjectToolViewSet.as_view({
+             'get': 'retrieve', 
+             'put': 'update', 
+             'patch': 'partial_update', 
+             'delete': 'destroy'
+         }), 
+         name='lecture-project-tools-detail'),
+    
+    # Quizzes
+    # Replace the existing quiz-related URL patterns with these:
+
+# Quiz (one-to-one with lecture)
+path('courses/<uuid:course_pk>/sections/<uuid:section_pk>/lectures/<uuid:lecture_pk>/quiz/', 
+     views.QuizViewSet.as_view({
+         'get': 'retrieve',
+         'post': 'create',
+         'put': 'update',
+         'patch': 'partial_update',
+         'delete': 'destroy'
+     }), 
+     name='lecture-quiz'),
+
+# Quiz Questions (nested under lecture quiz)
+path('courses/<uuid:course_pk>/sections/<uuid:section_pk>/lectures/<uuid:lecture_pk>/quiz/questions/', 
+     views.QuizQuestionViewSet.as_view({
+         'get': 'list', 
+         'post': 'create'
+     }), 
+     name='lecture-quiz-questions-list'),
+
+path('courses/<uuid:course_pk>/sections/<uuid:section_pk>/lectures/<uuid:lecture_pk>/quiz/questions/<uuid:pk>/', 
+     views.QuizQuestionViewSet.as_view({
+         'get': 'retrieve', 
+         'put': 'update', 
+         'patch': 'partial_update', 
+         'delete': 'destroy'
+     }), 
+     name='lecture-quiz-questions-detail'),
+
+# Quiz Tasks (nested under lecture quiz)
+path('courses/<uuid:course_pk>/sections/<uuid:section_pk>/lectures/<uuid:lecture_pk>/quiz/tasks/', 
+     views.QuizTaskViewSet.as_view({
+         'get': 'list', 
+         'post': 'create'
+     }), 
+     name='lecture-quiz-tasks-list'),
+
+path('courses/<uuid:course_pk>/sections/<uuid:section_pk>/lectures/<uuid:lecture_pk>/quiz/tasks/<uuid:pk>/', 
+     views.QuizTaskViewSet.as_view({
+         'get': 'retrieve', 
+         'put': 'update', 
+         'patch': 'partial_update', 
+         'delete': 'destroy'
+     }), 
+     name='lecture-quiz-tasks-detail'),
 ]
-
-# Alternative with nested routers (if you want to install drf-nested-routers)
-"""
-from rest_framework_nested import routers
-
-# Main router
-router = DefaultRouter()
-router.register(r'courses', views.CourseViewSet, basename='course')
-router.register(r'admin/courses', views.AdminCourseViewSet, basename='admin-course')
-router.register(r'categories', views.CourseCategoryViewSet, basename='category')
-
-# Nested routers
-courses_router = routers.NestedDefaultRouter(router, r'courses', lookup='course')
-courses_router.register(r'sections', views.CourseSectionViewSet, basename='course-sections')
-
-sections_router = routers.NestedDefaultRouter(courses_router, r'sections', lookup='section')
-sections_router.register(r'lectures', views.LectureViewSet, basename='section-lectures')
-
-lectures_router = routers.NestedDefaultRouter(sections_router, r'lectures', lookup='lecture')
-lectures_router.register(r'resources', views.LectureResourceViewSet, basename='lecture-resources')
-
-urlpatterns = [
-    path('', include(router.urls)),
-    path('', include(courses_router.urls)),
-    path('', include(sections_router.urls)),
-    path('', include(lectures_router.urls)),
-    path('search/', views.CourseSearchView.as_view(), name='course-search'),
-]
-"""
