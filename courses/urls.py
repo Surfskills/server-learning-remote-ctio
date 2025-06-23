@@ -123,9 +123,7 @@ urlpatterns = [
              'delete': 'destroy'
          }), 
          name='lecture-project-tools-detail'),
-    
-    # Quizzes
-    # Replace the existing quiz-related URL patterns with these:
+
 
 # Quiz (one-to-one with lecture)
 path('courses/<uuid:course_pk>/sections/<uuid:section_pk>/lectures/<uuid:lecture_pk>/quiz/', 
@@ -137,6 +135,10 @@ path('courses/<uuid:course_pk>/sections/<uuid:section_pk>/lectures/<uuid:lecture
          'delete': 'destroy'
      }), 
      name='lecture-quiz'),
+
+path('courses/<uuid:course_pk>/sections/<uuid:section_pk>/lectures/<uuid:lecture_pk>/quiz/full/', 
+     views.QuizViewSet.as_view({'get': 'retrieve_full'}), 
+     name='lecture-quiz-full'),
 
 # Quiz Questions (nested under lecture quiz)
 path('courses/<uuid:course_pk>/sections/<uuid:section_pk>/lectures/<uuid:lecture_pk>/quiz/questions/', 
@@ -171,4 +173,7 @@ path('courses/<uuid:course_pk>/sections/<uuid:section_pk>/lectures/<uuid:lecture
          'delete': 'destroy'
      }), 
      name='lecture-quiz-tasks-detail'),
+path('courses/<uuid:course_pk>/sections/<uuid:section_pk>/lectures/<uuid:lecture_pk>/quiz/full/', 
+     views.QuizViewSet.as_view({'get': 'retrieve_full'}), 
+     name='lecture-quiz-full'),
 ]

@@ -259,7 +259,13 @@ class LectureViewSet(BaseModelViewSet):
     def get_queryset(self):
         section_id = self.kwargs.get('section_pk')
         return Lecture.objects.filter(section_id=section_id).prefetch_related(
-            'resources', 'qa_items', 'project_tools', 'quizzes__questions', 'quizzes__tasks'
+            Prefetch('resources', queryset=LectureResource.objects.all()),
+            Prefetch('qa_items', queryset=QaItem.objects.all()),
+            Prefetch('project_tools', queryset=ProjectTool.objects.all()),
+            Prefetch('quizzes', queryset=Quiz.objects.prefetch_related(
+                Prefetch('questions', queryset=QuizQuestion.objects.all()),
+                Prefetch('tasks', queryset=QuizTask.objects.all())
+            ))
         ).order_by('order')
 
     def get_serializer_class(self):
@@ -392,7 +398,19 @@ class QuizViewSet(BaseModelViewSet):
         elif course_id:
             return Quiz.objects.filter(course_id=course_id).prefetch_related('questions', 'tasks')
         return Quiz.objects.none()
-
+    
+    @action(detail=True, methods=['get'])
+    def retrieve_full(self, request, course_pk=None, section_pk=None, lecture_pk=None):
+        quiz = self.get_object()
+        questions = quiz.questions.all()
+        tasks = quiz.tasks.all()
+        
+        return Response({
+            'quiz': QuizSerializer(quiz).data,
+            'questions': QuizQuestionSerializer(questions, many=True).data,
+            'tasks': QuizTaskSerializer(tasks, many=True).data
+        })
+    
     def get_object(self):
         """Override get_object to handle one-to-one relationship with lecture"""
         lecture_id = self.kwargs.get('lecture_pk', None)
