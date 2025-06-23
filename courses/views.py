@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import action
 from django.db.models import Q, Prefetch
+from django.db import transaction  # Add this import
 from django.shortcuts import get_object_or_404
 
 from .models import (
@@ -56,7 +57,7 @@ class CourseViewSet(BaseModelViewSet, CourseFilterMixin):
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAuthenticated(), IsAdminOrCourseInstructor()]
-        elif self.action in ['enroll', 'update_status']:
+        elif self.action in ['enroll', 'update_status', 'reorder_sections']:
             return [IsAuthenticated()]
         return [IsAuthenticated()]
 
@@ -66,6 +67,7 @@ class CourseViewSet(BaseModelViewSet, CourseFilterMixin):
         if not (self.request.user.is_staff or self.request.user.is_superuser):
             queryset = queryset.filter(is_published=True)
         return queryset
+    
     def perform_create(self, serializer):
         # Check if instructor_id is provided in the data
         instructor_id = self.request.data.get('instructor_id')
@@ -113,6 +115,46 @@ class CourseViewSet(BaseModelViewSet, CourseFilterMixin):
         course.is_published = is_published
         course.save()
         return success_response('Course status updated successfully')
+    
+    @action(detail=True, methods=['patch'], url_path='archive')
+    def archive(self, request, pk=None):
+        """Toggle course archive status"""
+        course = self.get_object()
+        is_active = request.data.get('is_active', True)
+        
+        # Update the course
+        course.is_active = is_active
+        course.save()
+        
+        # Serialize and return updated course
+        serializer = self.get_serializer(course)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def reorder_sections(self, request, pk=None):
+        """Reorder sections within a course"""
+        course = self.get_object()
+        
+        # Check permissions
+        if not (request.user.is_staff or request.user.is_superuser or course.instructor == request.user):
+            return error_response('Permission denied', status_code=status.HTTP_403_FORBIDDEN)
+        
+        sections_data = request.data.get('sections', [])
+        
+        if not sections_data:
+            return error_response('sections data is required', status_code=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            with transaction.atomic():
+                for section_data in sections_data:
+                    section = CourseSection.objects.get(id=section_data['id'], course=course)
+                    section.order = section_data['order']
+                    section.save()
+            return success_response('Sections reordered successfully', status_code=status.HTTP_200_OK)
+        except CourseSection.DoesNotExist:
+            return error_response('One or more sections not found', status_code=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return error_response(str(e), status_code=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=True, methods=['get'])
     def sections(self, request, pk=None):
@@ -209,6 +251,9 @@ class CourseDetailView(generics.RetrieveAPIView):
         return context
 
 
+import time
+from django.db import transaction, OperationalError, IntegrityError
+
 class CourseSectionViewSet(BaseModelViewSet):
     serializer_class = CourseSectionSerializer
     permission_classes = [IsAuthenticated, IsAdminOrCourseInstructor]
@@ -220,36 +265,42 @@ class CourseSectionViewSet(BaseModelViewSet):
             return CourseSection.objects.none()
         return CourseSection.objects.filter(course_id=course_id).order_by('order')
 
+    def create(self, request, *args, **kwargs):
+        """Override create with simple retry logic"""
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                return super().create(request, *args, **kwargs)
+                
+            except OperationalError as e:
+                if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                    time.sleep(0.5 * (attempt + 1))  # Progressive delay: 0.5s, 1s, 1.5s
+                    continue
+                return error_response(
+                    "Service temporarily unavailable. Please try again.", 
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE
+                )
+                
+            except IntegrityError:
+                return error_response(
+                    "Unable to create section. Please refresh and try again.", 
+                    status_code=status.HTTP_409_CONFLICT
+                )
+
     def perform_create(self, serializer):
         course = get_object_or_404(Course, pk=self.kwargs.get('course_pk'))
         
-        # Verify permissions again for extra security
         if not (self.request.user.is_staff or 
                 self.request.user.is_superuser or 
                 course.instructor == self.request.user):
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("You don't have permission to create sections for this course.")
         
-        # Calculate next order number
-        last_section = CourseSection.objects.filter(course=course).order_by('-order').first()
-        next_order = (last_section.order + 1) if last_section else 1
-        
-        serializer.save(course=course, order=next_order)
-
-    @action(detail=True, methods=['post'])
-    def reorder(self, request, course_pk=None, pk=None):
-        section = self.get_object()
-        new_order = request.data.get('order')
-        
-        if new_order is None:
-            return error_response('Order is required', status_code=status.HTTP_400_BAD_REQUEST)
-        
-        try:
-            section.order = new_order
-            section.save()
-            return success_response('Section reordered successfully')
-        except Exception as e:
-            return error_response(str(e), status_code=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            last_section = CourseSection.objects.filter(course=course).order_by('-order').first()
+            next_order = (last_section.order + 1) if last_section else 1
+            serializer.save(course=course, order=next_order)
 
 
 class LectureViewSet(BaseModelViewSet):
@@ -515,16 +566,3 @@ class QuizTaskViewSet(BaseModelViewSet):
         last_task = QuizTask.objects.filter(quiz=quiz).order_by('-order').first()
         new_order = (last_task.order + 1) if last_task else 1
         serializer.save(quiz=quiz, order=new_order)
-
-        
-class LectureResourceViewSet(BaseModelViewSet):
-    serializer_class = LectureResourceSerializer
-    permission_classes = [IsAuthenticated, CanAccessCourseContent]
-
-    def get_queryset(self):
-        lecture_id = self.kwargs.get('lecture_pk')
-        return LectureResource.objects.filter(lecture_id=lecture_id)
-
-    def perform_create(self, serializer):
-        lecture = get_object_or_404(Lecture, pk=self.kwargs.get('lecture_pk'))
-        serializer.save(lecture=lecture)

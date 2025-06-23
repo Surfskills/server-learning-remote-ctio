@@ -51,7 +51,7 @@ class Course(BaseModel):
     thumbnail = models.ImageField(upload_to='course_thumbnails/', blank=True, null=True)
     preview_video_url = models.URLField(max_length=500, blank=True, null=True)
     instructor = models.ForeignKey(User, on_delete=models.CASCADE, related_name='courses_taught')
-    category = models.ForeignKey(CourseCategory, on_delete=models.SET_NULL, null=True, blank=True, related_name='courses')
+    category = models.ForeignKey('CourseCategory', on_delete=models.SET_NULL, null=True, blank=True, related_name='courses')
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     discount_price = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     level = models.CharField(max_length=20, choices=LEVEL_CHOICES, default='beginner')
@@ -70,11 +70,39 @@ class Course(BaseModel):
     def __str__(self):
         return self.title
 
+    def generate_unique_slug(self):
+        """Generate a unique slug for the course"""
+        base_slug = slugify(self.title)
+        if not base_slug:  # Handle edge case where title has no alphanumeric characters
+            base_slug = f"course-{get_random_string(8).lower()}"
+        
+        slug = base_slug
+        counter = 1
+        
+        # Keep trying until we find a unique slug
+        # Exclude current instance if updating
+        queryset = Course.objects.filter(slug=slug)
+        if self.pk:
+            queryset = queryset.exclude(pk=self.pk)
+            
+        while queryset.exists():
+            slug = f"{base_slug}-{counter}"
+            queryset = Course.objects.filter(slug=slug)
+            if self.pk:
+                queryset = queryset.exclude(pk=self.pk)
+            counter += 1
+            
+        return slug
+
     def save(self, *args, **kwargs):
-        if not self.slug:
-            self.slug = slugify(self.title)
+        # Generate unique slug if not provided or if title changed
+        if not self.slug or (self.pk and Course.objects.get(pk=self.pk).title != self.title):
+            self.slug = self.generate_unique_slug()
+        
+        # Handle publication timestamp
         if self.is_published and not self.published_at:
             self.published_at = timezone.now()
+            
         super().save(*args, **kwargs)
 
     @property
