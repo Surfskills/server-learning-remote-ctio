@@ -328,7 +328,26 @@ class LectureViewSet(BaseModelViewSet):
         section = get_object_or_404(CourseSection, pk=self.kwargs.get('section_pk'))
         last_lecture = Lecture.objects.filter(section=section).order_by('-order').first()
         new_order = (last_lecture.order + 1) if last_lecture else 1
-        serializer.save(section=section, order=new_order)
+        
+        # Save the lecture and get the instance
+        lecture = serializer.save(section=section, order=new_order)
+        
+        # Return the created lecture instance so it's available in the response
+        return lecture
+
+    def create(self, request, *args, **kwargs):
+        """Override create to ensure proper response with ID"""
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        # Create the lecture
+        lecture = self.perform_create(serializer)
+        
+        # Use the main serializer to format the response
+        response_serializer = LectureSerializer(lecture, context={'request': request})
+        
+        headers = self.get_success_headers(response_serializer.data)
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
     @action(detail=True, methods=['post'])
     def add_qa(self, request, pk=None, section_pk=None):
