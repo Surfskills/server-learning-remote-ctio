@@ -255,53 +255,171 @@ import time
 from django.db import transaction, OperationalError, IntegrityError
 
 class CourseSectionViewSet(BaseModelViewSet):
+    """
+    ViewSet for managing course sections with protection against duplicate creation.
+    Includes proper transaction handling and database-level constraints.
+    """
     serializer_class = CourseSectionSerializer
-    permission_classes = [IsAuthenticated, IsAdminOrCourseInstructor]
+    permission_classes = [IsAdminOrCourseInstructor]
     lookup_field = 'pk'
 
     def get_queryset(self):
+        """Get sections for the specified course, ordered by their position"""
         course_id = self.kwargs.get('course_pk')
         if not course_id:
             return CourseSection.objects.none()
         return CourseSection.objects.filter(course_id=course_id).order_by('order')
 
     def create(self, request, *args, **kwargs):
-        """Override create with simple retry logic"""
-        max_retries = 3
+        """
+        Create a new course section with protection against:
+        - Duplicate titles within the same course
+        - Order conflicts
+        - Race conditions
+        """
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
         
-        for attempt in range(max_retries):
-            try:
-                return super().create(request, *args, **kwargs)
-                
-            except OperationalError as e:
-                if "database is locked" in str(e).lower() and attempt < max_retries - 1:
-                    time.sleep(0.5 * (attempt + 1))  # Progressive delay: 0.5s, 1s, 1.5s
-                    continue
-                return error_response(
-                    "Service temporarily unavailable. Please try again.", 
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE
-                )
-                
-            except IntegrityError:
-                return error_response(
-                    "Unable to create section. Please refresh and try again.", 
-                    status_code=status.HTTP_409_CONFLICT
-                )
-
-    def perform_create(self, serializer):
         course = get_object_or_404(Course, pk=self.kwargs.get('course_pk'))
         
-        if not (self.request.user.is_staff or 
-                self.request.user.is_superuser or 
-                course.instructor == self.request.user):
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("You don't have permission to create sections for this course.")
+        # Permission check (outside transaction for early failure)
+        if not (request.user.is_staff or 
+                request.user.is_superuser or 
+                course.instructor == request.user):
+            return error_response(
+                "You don't have permission to create sections for this course",
+                status_code=status.HTTP_403_FORBIDDEN
+            )
         
-        with transaction.atomic():
-            last_section = CourseSection.objects.filter(course=course).order_by('-order').first()
-            next_order = (last_section.order + 1) if last_section else 1
-            serializer.save(course=course, order=next_order)
+        # Check for duplicate title (case-insensitive)
+        title = serializer.validated_data['title']
+        if CourseSection.objects.filter(
+            course=course, 
+            title__iexact=title
+        ).exists():
+            return error_response(
+                "A section with this title already exists in this course",
+                status_code=status.HTTP_409_CONFLICT
+            )
 
+        try:
+            with transaction.atomic():
+                # Lock the course sections to prevent concurrent order conflicts
+                sections = CourseSection.objects.filter(
+                    course=course
+                ).select_for_update().order_by('-order')
+                
+                last_section = sections.first()
+                next_order = (last_section.order + 1) if last_section else 1
+                
+                # Verify order isn't taken (double-check for race conditions)
+                if CourseSection.objects.filter(
+                    course=course, 
+                    order=next_order
+                ).exists():
+                    raise IntegrityError("Order conflict detected")
+                
+                # Create the section
+                section = serializer.save(
+                    course=course, 
+                    order=next_order
+                )
+                
+                # Return the created section
+                headers = self.get_success_headers(serializer.data)
+                return Response(
+                    serializer.data,
+                    status=status.HTTP_201_CREATED,
+                    headers=headers
+                )
+                
+        except IntegrityError as e:
+            return error_response(
+                "Failed to create section due to concurrent modification. Please try again.",
+                status_code=status.HTTP_409_CONFLICT
+            )
+        except Exception as e:
+            return error_response(
+                f"An error occurred: {str(e)}",
+                status_code=status.HTTP_400_BAD_REQUEST
+            )
+
+    def perform_update(self, serializer):
+        """Update section with protection against duplicate titles"""
+        course = get_object_or_404(Course, pk=self.kwargs.get('course_pk'))
+        instance = self.get_object()
+        
+        # Check for duplicate title (case-insensitive, excluding current instance)
+        if 'title' in serializer.validated_data:
+            title = serializer.validated_data['title']
+            if CourseSection.objects.filter(
+                course=course,
+                title__iexact=title
+            ).exclude(pk=instance.pk).exists():
+                raise serializers.ValidationError(
+                    "A section with this title already exists in this course"
+                )
+        
+        serializer.save()
+
+    @action(detail=True, methods=['post'])
+    def reorder(self, request, course_pk=None, pk=None):
+        """Reorder sections with proper transaction isolation"""
+        section = self.get_object()
+        new_order = request.data.get('order')
+        
+        if new_order is None or not isinstance(new_order, int):
+            return error_response(
+                "Valid order number is required",
+                status_code=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            with transaction.atomic():
+                # Lock all sections for this course during reordering
+                sections = CourseSection.objects.filter(
+                    course_id=course_pk
+                ).select_for_update().order_by('order')
+                
+                current_order = section.order
+                
+                if new_order < 1:
+                    return error_response(
+                        "Order must be a positive integer",
+                        status_code=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                if new_order > sections.count():
+                    return error_response(
+                        "Order exceeds number of sections",
+                        status_code=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                if new_order == current_order:
+                    return Response({'status': 'no change needed'})
+                
+                # Update orders of affected sections
+                if new_order > current_order:
+                    sections.filter(
+                        order__gt=current_order,
+                        order__lte=new_order
+                    ).update(order=models.F('order') - 1)
+                else:
+                    sections.filter(
+                        order__lt=current_order,
+                        order__gte=new_order
+                    ).update(order=models.F('order') + 1)
+                
+                section.order = new_order
+                section.save()
+                
+                return Response({'status': 'reorder successful'})
+                
+        except Exception as e:
+            return error_response(
+                f"Failed to reorder: {str(e)}",
+                status_code=status.HTTP_400_BAD_REQUEST
+            )
 
 class LectureViewSet(BaseModelViewSet):
     serializer_class = LectureSerializer
