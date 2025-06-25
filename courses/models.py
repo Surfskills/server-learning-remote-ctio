@@ -3,9 +3,11 @@ from django.db import models
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
 from django.utils.text import slugify
-
+from django.utils.crypto import get_random_string
+from django.db.models import Q
 from core.models import BaseModel
 from authentication.models import User
+# REMOVED: from enrollments.models import Enrollment
 
 class CourseCategory(BaseModel):
     name = models.CharField(max_length=100)
@@ -69,7 +71,50 @@ class Course(BaseModel):
 
     def __str__(self):
         return self.title
-
+    
+    def is_content_available_for(self, user, content_object):
+        """
+        Check if content is available for a specific user based on release rules
+        """
+        if not hasattr(self, 'release_schedule'):
+            return True  # No schedule means all content is available
+        
+        if self.release_schedule.unlock_all:
+            return True
+            
+        try:
+            # Use string reference to avoid circular import
+            from django.apps import apps
+            Enrollment = apps.get_model('enrollments', 'Enrollment')
+            enrollment = self.enrollments.get(student=user)
+        except Exception:  # Catch both DoesNotExist and import issues
+            return False
+            
+        # Check release rules
+        rules = self.release_schedule.rules.filter(
+            Q(section=content_object) |
+            Q(lecture=content_object) |
+            Q(quiz=content_object) |
+            Q(assignment=content_object)
+        )
+        
+        if not rules.exists():
+            return True  # No specific rules for this content
+            
+        for rule in rules:
+            if rule.trigger == 'enrollment':
+                days_since_enrollment = (timezone.now() - enrollment.enrolled_at).days
+                if days_since_enrollment >= rule.offset_days:
+                    return True
+            elif rule.trigger == 'date' and rule.release_date:
+                if timezone.now() >= rule.release_date:
+                    return True
+            elif rule.trigger == 'completion':
+                # Check if prerequisite content is completed
+                pass
+                
+        return False
+    
     def generate_unique_slug(self):
         """Generate a unique slug for the course"""
         base_slug = slugify(self.title)

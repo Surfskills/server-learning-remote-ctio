@@ -209,3 +209,225 @@ class CanAccessCourseContent(BasePermission):
         # Check if user is enrolled
         from enrollments.models import Enrollment
         return Enrollment.objects.filter(course=course, student=request.user).exists()
+
+
+# === NEW CALENDAR APP SPECIFIC PERMISSIONS ===
+
+class CanAccessCalendarEvent(BasePermission):
+    """
+    Custom permission for calendar event access.
+    Allows access to:
+    - Admin users (staff/superuser)
+    - Event creators
+    - Event attendees
+    - Course instructors (for course events)
+    - Enrolled students (for course events)
+    """
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+            
+        # Admin users have full access
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+        
+        return True  # Allow authenticated users, specific checks in has_object_permission
+
+    def has_object_permission(self, request, view, obj):
+        if not request.user or not request.user.is_authenticated:
+            return False
+            
+        # Admin users have full access
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+        
+        # Check if user created the event
+        if obj.created_by == request.user:
+            return True
+        
+        # Check if user is an attendee
+        if obj.attendees.filter(id=request.user.id).exists():
+            return True
+        
+        # If it's a course event, check course permissions
+        if obj.course:
+            # Check if user is the course instructor
+            if obj.course.instructor == request.user:
+                return True
+                
+            # Check if user is enrolled in the course
+            from enrollments.models import Enrollment
+            if Enrollment.objects.filter(course=obj.course, student=request.user, is_active=True).exists():
+                return True
+        
+        return False
+
+
+class CanAccessContentReleaseSchedule(BasePermission):
+    """
+    Custom permission for content release schedule access.
+    Allows access to:
+    - Admin users (staff/superuser)
+    - Course instructors
+    - Schedule creators
+    - Enrolled students (read-only)
+    """
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+            
+        # Admin users have full access
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+        
+        return True  # Allow authenticated users, specific checks in has_object_permission
+
+    def has_object_permission(self, request, view, obj):
+        if not request.user or not request.user.is_authenticated:
+            return False
+            
+        # Admin users have full access
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+        
+        # Check if user created the schedule
+        if obj.created_by == request.user:
+            return True
+        
+        # Check if user is the course instructor
+        if obj.course.instructor == request.user:
+            return True
+        
+        # Check if user is enrolled in the course (read-only access)
+        if request.method in permissions.SAFE_METHODS:
+            from enrollments.models import Enrollment
+            if Enrollment.objects.filter(course=obj.course, student=request.user, is_active=True).exists():
+                return True
+        
+        return False
+
+
+class CanAccessContentReleaseRule(BasePermission):
+    """
+    Custom permission for content release rule access.
+    Allows access to:
+    - Admin users (staff/superuser)
+    - Course instructors
+    - Schedule creators
+    - Enrolled students (read-only)
+    """
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+            
+        # Admin users have full access
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+        
+        return True  # Allow authenticated users, specific checks in has_object_permission
+
+    def has_object_permission(self, request, view, obj):
+        if not request.user or not request.user.is_authenticated:
+            return False
+            
+        # Admin users have full access
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+        
+        # Check if user created the schedule
+        if obj.schedule.created_by == request.user:
+            return True
+        
+        # Check if user is the course instructor
+        if obj.schedule.course.instructor == request.user:
+            return True
+        
+        # Check if user is enrolled in the course (read-only access)
+        if request.method in permissions.SAFE_METHODS:
+            from enrollments.models import Enrollment
+            if Enrollment.objects.filter(course=obj.schedule.course, student=request.user, is_active=True).exists():
+                return True
+        
+        return False
+
+
+class CanAccessStudentProgressOverride(BasePermission):
+    """
+    Custom permission for student progress override access.
+    Allows access to:
+    - Admin users (staff/superuser)
+    - Course instructors
+    - Schedule creators
+    """
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+            
+        # Admin users have full access
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+        
+        # Only instructors and admins can manage overrides
+        return getattr(request.user, 'user_type', None) == 'INSTRUCTOR'
+
+    def has_object_permission(self, request, view, obj):
+        if not request.user or not request.user.is_authenticated:
+            return False
+            
+        # Admin users have full access
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+        
+        # Check if user created the schedule
+        if obj.rule.schedule.created_by == request.user:
+            return True
+        
+        # Check if user is the course instructor
+        if obj.rule.schedule.course.instructor == request.user:
+            return True
+        
+        return False
+
+
+class IsOwnerOrAdmin(BasePermission):
+    """
+    Custom permission to only allow owners of an object or admin users to access it.
+    Assumes the model instance has an 'user' attribute.
+    """
+    def has_object_permission(self, request, view, obj):
+        if not request.user or not request.user.is_authenticated:
+            return False
+            
+        # Admin users have full access
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+        
+        # Check if user owns the object
+        return obj.user == request.user
+
+
+class CanManageCalendarNotifications(BasePermission):
+    """
+    Custom permission for calendar notification management.
+    Users can only manage their own notifications, admins can manage all.
+    """
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+            
+        # Admin users have full access
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+        
+        return True  # Allow authenticated users
+
+    def has_object_permission(self, request, view, obj):
+        if not request.user or not request.user.is_authenticated:
+            return False
+            
+        # Admin users have full access
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+        
+        # Users can only manage their own notifications
+        return obj.user == request.user

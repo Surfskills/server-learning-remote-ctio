@@ -531,7 +531,6 @@ class CalendarEvent(models.Model):
     EVENT_TYPE_CHOICES = [
         ('release', 'Content Release'),
         ('meeting', 'Live Meeting'),
-        ('assignment', 'Assignment'),
         ('quiz', 'Quiz'),
         ('lecture', 'Lecture'),
     ]
