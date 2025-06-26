@@ -189,6 +189,7 @@ class ContentReleaseRule(BaseModel):
     quiz = models.ForeignKey('courses.Quiz', on_delete=models.CASCADE, null=True, blank=True)
     is_released = models.BooleanField(default=False)
     release_event = models.ForeignKey(CalendarEvent, on_delete=models.SET_NULL, null=True, blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='created_release_rules')  # Add this field
 
     class Meta:
         ordering = ['release_date', 'offset_days']

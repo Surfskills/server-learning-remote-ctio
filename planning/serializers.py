@@ -85,19 +85,18 @@ class ContentReleaseRuleSerializer(serializers.ModelSerializer):
     section = CourseSectionSerializer(read_only=True)
     lecture = LectureSerializer(read_only=True)
     quiz = QuizSerializer(read_only=True)
-
     release_event = CalendarEventSerializer(read_only=True)
+    created_by = UserSerializer(read_only=True)  
     
     schedule_id = serializers.UUIDField(write_only=True)
     section_id = serializers.UUIDField(write_only=True, required=False, allow_null=True)
     lecture_id = serializers.UUIDField(write_only=True, required=False, allow_null=True)
     quiz_id = serializers.UUIDField(write_only=True, required=False, allow_null=True)
-  
 
     class Meta:
         model = ContentReleaseRule
         fields = '__all__'
-        read_only_fields = ['created_at', 'updated_at', 'is_released']
+        read_only_fields = ['created_at', 'updated_at', 'is_released', 'created_by']  # Add 'created_by' here
 
 class StudentProgressOverrideSerializer(serializers.ModelSerializer):
     student = UserSerializer(read_only=True)

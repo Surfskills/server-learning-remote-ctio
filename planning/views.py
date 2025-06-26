@@ -235,26 +235,61 @@ class ContentReleaseRuleViewSet(BaseModelViewSet):
 
     def get_queryset(self):
         schedule_id = self.request.query_params.get('schedule_id')
-        if not schedule_id:
-            return ContentReleaseRule.objects.none()
         
         if self.request.user.is_staff or self.request.user.is_superuser:
             # Admin can see all rules
-            queryset = ContentReleaseRule.objects.filter(schedule_id=schedule_id)
+            queryset = ContentReleaseRule.objects.all()
         else:
             # Regular users need proper permissions to the schedule
+            # Use a more inclusive approach for rule access
             queryset = ContentReleaseRule.objects.filter(
-                schedule_id=schedule_id,
-                schedule__in=ContentReleaseSchedule.objects.filter(
-                    Q(course__instructor=self.request.user) |
-                    Q(created_by=self.request.user) |
-                    Q(course__enrollments__student=self.request.user)
-                )
-            )
+                Q(schedule__course__instructor=self.request.user) |
+                Q(schedule__created_by=self.request.user) |
+                Q(schedule__course__enrollments__student=self.request.user) |
+                Q(created_by=self.request.user)  # Allow access to rules created by user
+            ).distinct()
+        
+        # Apply schedule_id filter if provided
+        if schedule_id:
+            queryset = queryset.filter(schedule_id=schedule_id)
         
         return queryset.select_related(
             'schedule', 'section', 'lecture', 'quiz', 'release_event'
         )
+
+    def get_object(self):
+        """
+        Override get_object to provide better error handling and 
+        ensure the user has permission to access the specific rule
+        """
+        obj = super().get_object()
+        
+        # Double-check permissions for the specific object
+        if not (self.request.user.is_staff or self.request.user.is_superuser):
+            # Check if user has permission to access this rule
+            has_permission = (
+                obj.schedule.course.instructor == self.request.user or
+                obj.schedule.created_by == self.request.user or
+                obj.created_by == self.request.user or
+                obj.schedule.course.enrollments.filter(student=self.request.user).exists()
+            )
+            
+            if not has_permission:
+                from django.core.exceptions import PermissionDenied
+                raise PermissionDenied("You don't have permission to access this rule")
+        
+        return obj
+
+    def perform_create(self, serializer):
+        """Ensure created_by is set when creating a rule"""
+        serializer.save(created_by=self.request.user)
+
+    def perform_update(self, serializer):
+        """Ensure created_by is set when updating a rule if not already set"""
+        if not serializer.instance.created_by:
+            serializer.save(created_by=self.request.user)
+        else:
+            serializer.save()
 
 class StudentProgressOverrideViewSet(BaseModelViewSet):
     serializer_class = StudentProgressOverrideSerializer
