@@ -7,7 +7,9 @@ from django.db.models import Q, Prefetch, F
 from django.db import transaction, OperationalError, IntegrityError
 from django.shortcuts import get_object_or_404
 import time
-from django.db import models  # Add this import
+from django.db import models
+
+from authentication.serializers import UserSerializer  # Add this import
 
 from .models import (
     Course, CourseCategory, CourseSection, Lecture, LectureResource,
@@ -428,7 +430,7 @@ class CourseDetailView(generics.RetrieveAPIView):
         context['request'] = self.request
         context['include_full_details'] = True
         return context
-
+    
     def retrieve(self, request, *args, **kwargs):
         """
         Override retrieve to add additional course statistics and data
@@ -440,11 +442,35 @@ class CourseDetailView(generics.RetrieveAPIView):
         # Add any additional real-time data if needed
         data = serializer.data
         
-        # You can add more computed fields here if needed
-        # For example, recent activity, popular lectures, etc.
+        # Add comprehensive stats if not already included in serializer
+        if 'stats' not in data:
+            # Calculate comprehensive stats
+            stats = instance.sections.aggregate(
+                total_sections=models.Count('id'),
+                total_lectures=models.Count('lectures'),
+                total_duration=models.Sum('lectures__duration'),
+                total_resources=models.Count('lectures__resources'),
+                total_qa_items=models.Count('lectures__qa_items'),
+                total_project_tools=models.Count('lectures__project_tools'),
+                total_lecture_quizzes=models.Count('lectures__quizzes')  # FIXED: quiz -> quizzes
+            )
+            
+            # Add section-level and course-level quiz counts
+            section_quizzes = instance.sections.filter(quizzes__isnull=False).count()  # FIXED: quiz -> quizzes
+            course_quizzes = Quiz.objects.filter(course=instance, section__isnull=True, lecture__isnull=True).count()
+            total_quizzes = (stats['total_lecture_quizzes'] or 0) + section_quizzes + course_quizzes
+            
+            # Add stats to response
+            data['resources_count'] = stats['total_resources'] or 0
+            data['qa_items'] = stats['total_qa_items'] or 0
+            data['qa_items_count'] = stats['total_qa_items'] or 0
+            data['project_tools'] = stats['total_project_tools'] or 0
+            data['project_tools_count'] = stats['total_project_tools'] or 0
+            data['quiz'] = total_quizzes
+            data['quizzes_count'] = total_quizzes
+            data['has_quiz'] = total_quizzes > 0
         
         return Response(data)
-
 
 class CourseContentView(generics.RetrieveAPIView):
     """
@@ -543,7 +569,7 @@ class CourseStatsView(generics.RetrieveAPIView):
             total_duration=Sum('lectures__duration'),
             total_resources=Count('lectures__resources'),
             total_qa_items=Count('lectures__qa_items'),
-            total_quizzes=Count('lectures__quiz')
+            total_quizzes=Count('lectures__quizzes')  # FIXED: quiz -> quizzes
         )
         
         # Add quiz questions and tasks count
@@ -576,6 +602,92 @@ class CourseStatsView(generics.RetrieveAPIView):
         data['total_duration_formatted'] = f"{hours}h {minutes}min" if hours > 0 else f"{minutes}min"
         
         return Response(data)
+
+
+# Fixed serializer methods as well
+class CourseDetailSerializer(CourseSerializer):
+    """
+    Extended serializer that includes all nested data for the course detail page.
+    """
+    sections = CourseSectionSerializer(many=True, read_only=True)
+    instructor = UserSerializer(read_only=True)  # You'll need a UserSerializer
+    is_enrolled = serializers.SerializerMethodField()
+    resources_count = serializers.SerializerMethodField()
+    qa_items = serializers.SerializerMethodField()
+    qa_items_count = serializers.SerializerMethodField()
+    project_tools = serializers.SerializerMethodField()
+    project_tools_count = serializers.SerializerMethodField()
+    quiz = serializers.SerializerMethodField()
+    quizzes_count = serializers.SerializerMethodField()
+    has_quiz = serializers.SerializerMethodField()
+    
+    class Meta(CourseSerializer.Meta):
+        fields = CourseSerializer.Meta.fields + [
+            'long_description',
+            'banner_url',
+            'preview_video_url',
+            'sections',
+            'instructor',
+            'is_enrolled',
+            'rating',
+            'review_count',
+            'students_enrolled',
+            'duration',
+            'created_at',
+            'updated_at',
+            'language',
+            'level',
+            'prerequisites',
+            'what_you_will_learn',
+            'who_is_this_for',
+            'certificate_available',
+            'resources_available',
+            'lifetime_access',
+        ]
+    
+    def get_resources_count(self, obj):
+        return obj.sections.aggregate(
+            count=models.Count('lectures__resources')
+        )['count'] or 0
+    
+    def get_qa_items(self, obj):
+        return obj.sections.aggregate(
+            count=models.Count('lectures__qa_items')
+        )['count'] or 0
+    
+    def get_qa_items_count(self, obj):
+        return self.get_qa_items(obj)
+    
+    def get_project_tools(self, obj):
+        return obj.sections.aggregate(
+            count=models.Count('lectures__project_tools')
+        )['count'] or 0
+    
+    def get_project_tools_count(self, obj):
+        return self.get_project_tools(obj)
+    
+    def get_quiz(self, obj):
+        # Count quizzes at all levels
+        lecture_quizzes = obj.sections.aggregate(
+            count=models.Count('lectures__quizzes')  # FIXED: quiz -> quizzes
+        )['count'] or 0
+        
+        section_quizzes = obj.sections.filter(quizzes__isnull=False).count()  # FIXED: quiz -> quizzes
+        course_quizzes = Quiz.objects.filter(course=obj, section__isnull=True, lecture__isnull=True).count()
+        
+        return lecture_quizzes + section_quizzes + course_quizzes
+    
+    def get_quizzes_count(self, obj):
+        return self.get_quiz(obj)
+    
+    def get_has_quiz(self, obj):
+        return self.get_quiz(obj) > 0
+
+    def get_is_enrolled(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return obj.enrollments.filter(student=request.user).exists()
+        return False
 
 class CourseSectionViewSet(BaseModelViewSet):
     """

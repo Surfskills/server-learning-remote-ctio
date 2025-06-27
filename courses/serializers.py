@@ -268,6 +268,14 @@ class CourseDetailSerializer(CourseSerializer):
     sections = CourseSectionSerializer(many=True, read_only=True)
     instructor = UserSerializer(read_only=True)  # You'll need a UserSerializer
     is_enrolled = serializers.SerializerMethodField()
+    resources_count = serializers.SerializerMethodField()
+    qa_items = serializers.SerializerMethodField()
+    qa_items_count = serializers.SerializerMethodField()
+    project_tools = serializers.SerializerMethodField()
+    project_tools_count = serializers.SerializerMethodField()
+    quiz = serializers.SerializerMethodField()
+    quizzes_count = serializers.SerializerMethodField()
+    has_quiz = serializers.SerializerMethodField()
     
     class Meta(CourseSerializer.Meta):
         fields = CourseSerializer.Meta.fields + [
@@ -293,6 +301,44 @@ class CourseDetailSerializer(CourseSerializer):
             'lifetime_access',
         ]
     
+    def get_resources_count(self, obj):
+        return obj.sections.aggregate(
+            count=models.Count('lectures__resources')
+        )['count'] or 0
+    
+    def get_qa_items(self, obj):
+        return obj.sections.aggregate(
+            count=models.Count('lectures__qa_items')
+        )['count'] or 0
+    
+    def get_qa_items_count(self, obj):
+        return self.get_qa_items(obj)
+    
+    def get_project_tools(self, obj):
+        return obj.sections.aggregate(
+            count=models.Count('lectures__project_tools')
+        )['count'] or 0
+    
+    def get_project_tools_count(self, obj):
+        return self.get_project_tools(obj)
+    
+    def get_quiz(self, obj):
+        # Count quizzes at all levels
+        lecture_quizzes = obj.sections.aggregate(
+            count=models.Count('lectures__quiz')
+        )['count'] or 0
+        
+        section_quizzes = obj.sections.filter(quiz__isnull=False).count()
+        course_quizzes = Quiz.objects.filter(course=obj, section__isnull=True, lecture__isnull=True).count()
+        
+        return lecture_quizzes + section_quizzes + course_quizzes
+    
+    def get_quizzes_count(self, obj):
+        return self.get_quiz(obj)
+    
+    def get_has_quiz(self, obj):
+        return self.get_quiz(obj) > 0
+
     def get_is_enrolled(self, obj):
         request = self.context.get('request')
         if request and request.user.is_authenticated:
