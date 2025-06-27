@@ -1,5 +1,5 @@
 from rest_framework import serializers
-
+from django.db import models 
 
 from .models import Course, CourseCategory, CourseSection, Lecture, LectureResource, ProjectTool, QaItem, Quiz, QuizQuestion, QuizTask
 from authentication.models import User
@@ -141,14 +141,14 @@ class CourseSerializer(serializers.ModelSerializer):
     category = CourseCategorySerializer(read_only=True)
     instructor_id = serializers.IntegerField(write_only=True, required=False)  # Make it optional
     category_id = serializers.UUIDField(write_only=True)
-    thumbnail = serializers.ImageField(required=False, write_only=True)
+ 
     
     class Meta:
         model = Course
         fields = [
             'id', 'title', 'description', 'level', 'language', 'price',
-            'instructor', 'instructor_id', 'category', 'category_id',
-            'thumbnail', 'banner_url', 'preview_video_url', 'duration',
+            'instructor', 'instructor_id', 'category', 'category_id', 'slug',
+    'banner_url', 'preview_video_url', 'duration',
             'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'instructor', 'category', 'banner_url', 'created_at', 'updated_at']
@@ -262,28 +262,366 @@ class CourseSectionSerializer(serializers.ModelSerializer):
 
 # Additional serializers for detailed responses
 class CourseDetailSerializer(CourseSerializer):
-    """Detailed course serializer with sections and lectures"""
-    sections = serializers.SerializerMethodField()
+    """
+    Extended serializer that includes all nested data for the course detail page.
+    """
+    sections = CourseSectionSerializer(many=True, read_only=True)
+    instructor = UserSerializer(read_only=True)  # You'll need a UserSerializer
+    is_enrolled = serializers.SerializerMethodField()
     
     class Meta(CourseSerializer.Meta):
-        fields = CourseSerializer.Meta.fields + ['sections']
-    
-    def get_sections(self, obj):
-        sections = obj.sections.all().order_by('order')
-        return [
-            {
-                'id': section.id,
-                'title': section.title,
-                'order': section.order,
-                'lectures': [
-                    {
-                        'id': lecture.id,
-                        'title': lecture.title,
-                        'duration': lecture.duration,
-                        'previewAvailable': lecture.preview_available
-                    }
-                    for lecture in section.lectures.all().order_by('order')
-                ]
-            }
-            for section in sections
+        fields = CourseSerializer.Meta.fields + [
+            'long_description',
+            'banner_url',
+            'preview_video_url',
+            'sections',
+            'instructor',
+            'is_enrolled',
+            'rating',
+            'review_count',
+            'students_enrolled',
+            'duration',
+            'created_at',
+            'updated_at',
+            'language',
+            'level',
+            'prerequisites',
+            'what_you_will_learn',
+            'who_is_this_for',
+            'certificate_available',
+            'resources_available',
+            'lifetime_access',
         ]
+    
+    def get_is_enrolled(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return obj.enrollments.filter(student=request.user).exists()
+        return False
+    
+
+
+class DetailQuizQuestionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QuizQuestion
+        fields = '__all__'
+
+class DetailQuizTaskSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QuizTask
+        fields = '__all__'
+
+class DetailQuizSerializer(serializers.ModelSerializer):
+    questions = DetailQuizQuestionSerializer(many=True, read_only=True)
+    tasks = DetailQuizTaskSerializer(many=True, read_only=True)
+    questions_count = serializers.SerializerMethodField()
+    tasks_count = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Quiz
+        fields = '__all__'
+    
+    def get_questions_count(self, obj):
+        return obj.questions.count()
+    
+    def get_tasks_count(self, obj):
+        return obj.tasks.count()
+
+class DetailQaItemSerializer(serializers.ModelSerializer):
+    asked_by = UserSerializer(read_only=True)
+    answers_count = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = QaItem
+        fields = '__all__'
+    
+    def get_answers_count(self, obj):
+        # If you have answers related to QA items, count them here
+        # return obj.answers.count()
+        return 0  # Placeholder
+
+class DetailProjectToolSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProjectTool
+        fields = '__all__'
+
+class DetailLectureResourceSerializer(serializers.ModelSerializer):
+    resource_type = serializers.CharField(source='kind')
+    file_url = serializers.URLField(source='url', required=False)
+    external_url = serializers.URLField(source='url', required=False)
+    file_size_formatted = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = LectureResource
+        fields = [
+            'id', 'title', 'resource_type', 'kind', 'url', 'file_url', 
+            'external_url', 'provider', 'duration_seconds', 'is_downloadable', 
+            'file_size', 'file_size_formatted', 'mime_type', 'created_at', 'updated_at'
+        ]
+    
+    def get_file_size_formatted(self, obj):
+        """Convert file size to human readable format"""
+        if not obj.file_size:
+            return None
+        
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if obj.file_size < 1024.0:
+                return f"{obj.file_size:.1f} {unit}"
+            obj.file_size /= 1024.0
+        return f"{obj.file_size:.1f} TB"
+
+class DetailLectureSerializer(serializers.ModelSerializer):
+    resources = DetailLectureResourceSerializer(many=True, read_only=True)
+    qa_items = DetailQaItemSerializer(many=True, read_only=True)
+    project_tools = DetailProjectToolSerializer(many=True, read_only=True)
+    quiz = DetailQuizSerializer(read_only=True)
+    is_completed = serializers.SerializerMethodField()
+    video_url = serializers.URLField(required=False, allow_blank=True)
+    description = serializers.CharField(source='overview', required=False, allow_blank=True, allow_null=True, default='')
+    previewAvailable = serializers.BooleanField(source='preview_available', read_only=True)
+    
+    # Additional computed fields
+    resources_count = serializers.SerializerMethodField()
+    qa_items_count = serializers.SerializerMethodField()
+    project_tools_count = serializers.SerializerMethodField()
+    has_quiz = serializers.SerializerMethodField()
+    duration_formatted = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Lecture
+        fields = [
+            'id', 'title', 'order', 'duration', 'duration_formatted', 'overview', 'description',
+            'preview_available', 'previewAvailable', 'video_url', 'resources',
+            'is_completed', 'created_at', 'updated_at', 'qa_items', 'project_tools', 'quiz',
+            'resources_count', 'qa_items_count', 'project_tools_count', 'has_quiz'
+        ]
+
+    def get_is_completed(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            try:
+                from enrollments.models import Enrollment
+                enrollment = Enrollment.objects.filter(
+                    student=request.user,
+                    course=obj.section.course
+                ).first()
+                if enrollment and hasattr(enrollment, 'progress'):
+                    return enrollment.progress.completed_lectures.filter(id=obj.id).exists()
+            except ImportError:
+                pass
+        return False
+    
+    def get_resources_count(self, obj):
+        return obj.resources.count()
+    
+    def get_qa_items_count(self, obj):
+        return obj.qa_items.count()
+    
+    def get_project_tools_count(self, obj):
+        return obj.project_tools.count()
+    
+    def get_has_quiz(self, obj):
+        return hasattr(obj, 'quiz') and obj.quiz is not None
+    
+    def get_duration_formatted(self, obj):
+        """Convert duration in minutes to human readable format"""
+        try:
+            duration = int(obj.duration)
+        except (TypeError, ValueError):
+            return "0 min"
+        
+        hours = duration // 60
+        minutes = duration % 60
+
+        if hours > 0:
+            return f"{hours}h {minutes}min" if minutes > 0 else f"{hours}h"
+        return f"{minutes}min"
+
+
+class DetailCourseSectionSerializer(serializers.ModelSerializer):
+    lectures = DetailLectureSerializer(many=True, read_only=True)
+    lectures_count = serializers.SerializerMethodField()
+    total_duration = serializers.SerializerMethodField()
+    completed_lectures_count = serializers.SerializerMethodField()
+    section_progress = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = CourseSection
+        fields = [
+            'id', 'title', 'description', 'order', 'created_at', 'updated_at',
+            'lectures', 'lectures_count', 'total_duration', 'completed_lectures_count',
+            'section_progress'
+        ]
+
+    def get_lectures_count(self, obj):
+        return obj.lectures.count()
+    
+    def get_total_duration(self, obj):
+        """Calculate total duration of all lectures in this section"""
+        total_minutes = obj.lectures.aggregate(
+            total=models.Sum('duration')
+        )['total'] or 0
+        
+        hours = total_minutes // 60
+        minutes = total_minutes % 60
+        
+        if hours > 0:
+            return f"{hours}h {minutes}min" if minutes > 0 else f"{hours}h"
+        return f"{minutes}min"
+    
+    def get_completed_lectures_count(self, obj):
+        """Count completed lectures for authenticated user"""
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            try:
+                from enrollments.models import Enrollment
+                enrollment = Enrollment.objects.filter(
+                    student=request.user,
+                    course=obj.course
+                ).first()
+                if enrollment and hasattr(enrollment, 'progress'):
+                    return enrollment.progress.completed_lectures.filter(
+                        section=obj
+                    ).count()
+            except ImportError:
+                pass
+        return 0
+    
+    def get_section_progress(self, obj):
+        """Calculate section progress percentage"""
+        total_lectures = self.get_lectures_count(obj)
+        completed_lectures = self.get_completed_lectures_count(obj)
+        
+        if total_lectures == 0:
+            return 0
+        
+        return round((completed_lectures / total_lectures) * 100, 1)
+
+class CourseDetailSerializer(serializers.ModelSerializer):
+    """
+    Comprehensive serializer that includes ALL nested data for the course detail page.
+    This includes sections, lectures, resources, Q&A, quizzes, questions, tasks, etc.
+    """
+    sections = DetailCourseSectionSerializer(many=True, read_only=True)
+    instructor = InstructorSerializer(read_only=True)
+    category = CourseCategorySerializer(read_only=True)
+    
+    # Enrollment and progress data
+    is_enrolled = serializers.SerializerMethodField()
+    enrollment_date = serializers.SerializerMethodField()
+    course_progress = serializers.SerializerMethodField()
+    
+    # Course statistics
+    total_lectures = serializers.SerializerMethodField()
+    total_duration = serializers.SerializerMethodField()
+    total_resources = serializers.SerializerMethodField()
+    total_quizzes = serializers.SerializerMethodField()
+    total_qa_items = serializers.SerializerMethodField()
+    
+    # Course structure summary
+    sections_count = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Course
+        fields = [
+            # Basic course info
+            'id', 'title', 'description', 'long_description', 'level', 'language', 'price',
+            'slug', 'banner_url', 'preview_video_url', 'duration', 'rating', 'review_count',
+            'students_enrolled', 'created_at', 'updated_at', 'is_published', 'is_active',
+            
+            # Related objects
+            'instructor', 'category', 'sections',
+            
+            # Course features/metadata
+            'prerequisites', 'what_you_will_learn', 'who_is_this_for',
+            'certificate_available',  'lifetime_access',
+            
+            # Enrollment and progress
+            'is_enrolled', 'enrollment_date', 'course_progress',
+            
+            # Statistics
+            'total_lectures', 'total_duration', 'total_resources', 'total_quizzes',
+            'total_qa_items', 'sections_count'
+        ]
+    
+    def get_is_enrolled(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            try:
+                from enrollments.models import Enrollment
+                return Enrollment.objects.filter(student=request.user, course=obj).exists()
+            except ImportError:
+                pass
+        return False
+    
+    def get_enrollment_date(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            try:
+                from enrollments.models import Enrollment
+                enrollment = Enrollment.objects.filter(
+                    student=request.user, 
+                    course=obj
+                ).first()
+                return enrollment.created_at if enrollment else None
+            except ImportError:
+                pass
+        return None
+    
+    def get_course_progress(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            try:
+                from enrollments.models import Enrollment
+                enrollment = Enrollment.objects.filter(
+                    student=request.user,
+                    course=obj
+                ).first()
+                if enrollment and hasattr(enrollment, 'progress'):
+                    total_lectures = obj.sections.aggregate(
+                        total=models.Count('lectures')
+                    )['total'] or 0
+                    completed_lectures = enrollment.progress.completed_lectures.count()
+                    
+                    if total_lectures == 0:
+                        return 0
+                    
+                    return round((completed_lectures / total_lectures) * 100, 1)
+            except ImportError:
+                pass
+        return 0
+    
+    def get_total_lectures(self, obj):
+        return obj.sections.aggregate(
+            total=models.Count('lectures')
+        )['total'] or 0
+    
+    def get_total_duration(self, obj):
+        """Calculate total course duration from all lectures"""
+        from django.db.models import Sum
+        total_minutes = obj.sections.aggregate(
+            total=Sum('lectures__duration')
+        )['total'] or 0
+        
+        hours = total_minutes // 60
+        minutes = total_minutes % 60
+        
+        if hours > 0:
+            return f"{hours}h {minutes}min" if minutes > 0 else f"{hours}h"
+        return f"{minutes}min"
+    
+    def get_total_resources(self, obj):
+        return LectureResource.objects.filter(
+            lecture__section__course=obj
+        ).count()
+    
+    def get_total_quizzes(self, obj):
+        return Quiz.objects.filter(course=obj).count()
+    
+    def get_total_qa_items(self, obj):
+        return QaItem.objects.filter(
+            lecture__section__course=obj
+        ).count()
+    
+    def get_sections_count(self, obj):
+        return obj.sections.count()

@@ -72,7 +72,19 @@ urlpatterns = [
         'patch': 'partial_update',  # Partial course update
         'delete': 'destroy'         # Delete course and all related content
     }), name='course-detail'),
+
+    # Get Full course details
+    path('courses/<slug:slug>/detail/', views.CourseDetailView.as_view(), name='course-detail-full'),
     
+    # Course content structure (lightweight)
+    path('courses/<slug:slug>/content/', views.CourseContentView.as_view(), name='course-content'),
+    
+    # Course statistics
+    path('courses/<slug:slug>/stats/', views.CourseStatsView.as_view(), name='course-stats'),
+    
+    # Course sections
+    path('courses/<uuid:pk>/sections/', views.CourseViewSet.as_view({'get': 'sections'}), name='course-sections'),
+
     # =============================================================================
     # COURSE SECTIONS MANAGEMENT
     # =============================================================================
@@ -99,6 +111,13 @@ urlpatterns = [
              'delete': 'destroy'         # Delete section and all lectures
          }), 
          name='course-section-detail'),
+    
+    # Section reordering
+    # POST /courses/{uuid}/sections/{uuid}/reorder/
+    # Body: {"order": 3}
+    path('courses/<uuid:course_pk>/sections/<uuid:pk>/reorder/', 
+         views.CourseSectionViewSet.as_view({'post': 'reorder'}), 
+         name='section-reorder'),
     
     # Bulk section reordering
     # POST /courses/{uuid}/sections/reorder/
@@ -312,24 +331,28 @@ urlpatterns = [
          }), 
          name='lecture-quiz-tasks-detail'),
 
-         # Course status update
-# PATCH /courses/{uuid}/status/
-# Body: {"is_published": true/false}
-path('courses/<uuid:pk>/update_status/', 
-     views.CourseViewSet.as_view({'patch': 'update_status'}), 
-     name='course-status-update'),
+    # =============================================================================
+    # COURSE ACTIONS
+    # =============================================================================
+    # Course status update
+    # PATCH /courses/{uuid}/status/
+    # Body: {"is_published": true/false}
+    path('courses/<uuid:pk>/update_status/', 
+         views.CourseViewSet.as_view({'patch': 'update_status'}), 
+         name='course-status-update'),
 
-path('courses/<uuid:pk>/enroll/', 
-     views.CourseViewSet.as_view({'post': 'enroll'}), 
-     name='course-enroll'),
+    # Course enrollment
+    # POST /courses/{uuid}/enroll/
+    path('courses/<uuid:pk>/enroll/', 
+         views.CourseViewSet.as_view({'post': 'enroll'}), 
+         name='course-enroll'),
 
-
-path('courses/<uuid:pk>/archive/', 
-     views.CourseViewSet.as_view({'patch': 'archive'}), 
-     name='archive'),
+    # Course archive
+    # PATCH /courses/{uuid}/archive/
+    path('courses/<uuid:pk>/archive/', 
+         views.CourseViewSet.as_view({'patch': 'archive'}), 
+         name='course-archive'),
 ]
-
-
 
 # =============================================================================
 # ADDITIONAL NOTES
@@ -346,6 +369,7 @@ URL Parameter Types:
 - section_pk: UUID of the course section  
 - lecture_pk: UUID of the lecture
 - pk: UUID of the specific resource being accessed
+- slug: Course slug for SEO-friendly URLs
 
 Common HTTP Status Codes:
 - 200: Success (GET, PUT, PATCH)

@@ -13,6 +13,7 @@ class CourseCategory(BaseModel):
     name = models.CharField(max_length=100)
     slug = models.SlugField(max_length=100, unique=True)
     description = models.TextField(blank=True, null=True)
+    is_active = models.BooleanField(default=True) 
 
     class Meta:
         verbose_name_plural = "Course Categories"
@@ -65,6 +66,17 @@ class Course(BaseModel):
     is_published = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
     published_at = models.DateTimeField(blank=True, null=True)
+    prerequisites = models.ManyToManyField(
+        'self',
+        blank=True,
+        symmetrical=False,
+        related_name='prerequisite_for',
+        help_text="Courses that must be completed before this course"
+    )
+    what_you_will_learn = models.TextField(blank=True, null=True)
+    who_is_this_for = models.TextField(blank=True, null=True)
+    certificate_available = models.BooleanField(default=False)
+    lifetime_access = models.BooleanField(default=True) 
 
     class Meta:
         ordering = ['-created_at']
@@ -164,7 +176,7 @@ class CourseSection(BaseModel):
     course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='sections')
     title = models.CharField(max_length=200)
     order = models.PositiveIntegerField(default=0)
-
+    description = models.TextField(blank=True, null=True)
     class Meta:
         ordering = ['order']
         unique_together = ['course', 'order']

@@ -14,7 +14,7 @@ from .models import (
     QaItem, ProjectTool, Quiz, QuizQuestion, QuizTask
 )
 from .serializers import (
-    CourseSerializer, CourseCategorySerializer, CourseSectionSerializer,
+    CourseDetailSerializer, CourseSerializer, CourseCategorySerializer, CourseSectionSerializer,
     LectureSerializer, LectureResourceSerializer, LectureCreateSerializer,
     AdminCourseSerializer, QaItemSerializer, ProjectToolSerializer,
     QuizSerializer, QuizQuestionSerializer, QuizTaskSerializer
@@ -83,7 +83,10 @@ class CourseViewSet(BaseModelViewSet, CourseFilterMixin):
     serializer_class = CourseSerializer
 
     def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+        # Allow public access for list and retrieve actions
+        if self.action in ['list', 'retrieve']:
+            return []
+        elif self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsAuthenticated(), IsAdminOrCourseInstructor()]
         elif self.action in ['enroll', 'update_status', 'reorder_sections']:
             return [IsAuthenticated()]
@@ -91,7 +94,12 @@ class CourseViewSet(BaseModelViewSet, CourseFilterMixin):
 
     def get_queryset(self):
         queryset = super().filter_queryset(super().get_queryset())
-        # Admin users can see all courses, regular users only see published ones
+        
+        # For public access (non-authenticated users), only show published courses
+        if not self.request.user.is_authenticated:
+            return queryset.filter(is_published=True, is_active=True)
+        
+        # Admin users can see all courses, regular authenticated users only see published ones
         if not (self.request.user.is_staff or self.request.user.is_superuser):
             queryset = queryset.filter(is_published=True)
         return queryset
@@ -155,7 +163,7 @@ class CourseViewSet(BaseModelViewSet, CourseFilterMixin):
         
         return execute_with_retry(_update_status)
     
-    @action(detail=True, methods=['patch'], url_path='archive')
+    @action(detail=True, methods=['patch'], url_path='archive', permission_classes=[IsAuthenticated])
     def archive(self, request, pk=None):
         """Toggle course archive status"""
         def _archive():
@@ -173,7 +181,7 @@ class CourseViewSet(BaseModelViewSet, CourseFilterMixin):
         
         return execute_with_retry(_archive)
     
-    @action(detail=True, methods=['post'])
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
     def reorder_sections(self, request, pk=None):
         """Reorder sections within a course"""
         def _reorder_sections():
@@ -211,6 +219,12 @@ class CourseViewSet(BaseModelViewSet, CourseFilterMixin):
         """Get sections for a specific course with optimized queries"""
         def _get_sections():
             course = self.get_object()
+            
+            # For non-authenticated users, only show published courses
+            if not request.user.is_authenticated and not course.is_published:
+                from django.http import Http404
+                raise Http404("Course not found")
+            
             sections = course.sections.prefetch_related(
                 Prefetch('lectures', queryset=Lecture.objects.order_by('order'))
             ).order_by('order')
@@ -230,7 +244,6 @@ class CourseViewSet(BaseModelViewSet, CourseFilterMixin):
             return Response({'results': sections_data})
         
         return execute_with_retry(_get_sections)
-
 
 class AdminCourseViewSet(BaseModelViewSet, CourseFilterMixin):
     """Admin-specific course management with additional fields and controls"""
@@ -266,14 +279,16 @@ class CourseCategoryViewSet(BaseModelViewSet):
         return [IsAuthenticated()]
 
 
+
 class CourseSearchView(generics.ListAPIView):
     serializer_class = CourseSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = []  # Allow public access
     pagination_class = None  # Disable pagination for search results
 
     def get_queryset(self):
         def _get_queryset():
-            queryset = Course.objects.filter(is_published=True)
+            # Only show published and active courses for public search
+            queryset = Course.objects.filter(is_published=True, is_active=True)
             search_term = self.request.query_params.get('q')
             category = self.request.query_params.get('category')
             level = self.request.query_params.get('level')
@@ -300,15 +315,267 @@ class CourseSearchView(generics.ListAPIView):
 
 
 class CourseDetailView(generics.RetrieveAPIView):
-    serializer_class = CourseSerializer
-    permission_classes = [IsAuthenticated]
-    queryset = Course.objects.all()
+    """
+    Comprehensive course detail endpoint that returns ALL data needed for the course detail page.
+    This includes:
+    - Course basic info and metadata
+    - Instructor details
+    - All sections with their lectures
+    - All lecture resources, Q&A items, project tools
+    - All quizzes with their questions and tasks
+    - User enrollment and progress data
+    - Course statistics and summaries
+    """
+    serializer_class = CourseDetailSerializer
+    permission_classes = []  # Allow public access
+    lookup_field = 'slug'  # Use slug for SEO-friendly URLs
+    lookup_url_kwarg = 'slug'
+
+    def get_queryset(self):
+        """
+        Optimized queryset with all necessary prefetch_related calls
+        to minimize database queries for the comprehensive course detail.
+        """
+        queryset = Course.objects.select_related(
+            'instructor',
+            'category'
+        ).prefetch_related(
+            # Sections with lectures and all their related data
+            Prefetch(
+                'sections',
+                queryset=CourseSection.objects.order_by('order').prefetch_related(
+                    Prefetch(
+                        'lectures',
+                        queryset=Lecture.objects.order_by('order').prefetch_related(
+                            # Lecture resources
+                            Prefetch(
+                                'resources',
+                                queryset=LectureResource.objects.all()
+                            ),
+                            # Q&A items with user info
+                            Prefetch(
+                                'qa_items',
+                                queryset=QaItem.objects.select_related('asked_by').order_by('-created_at')
+                            ),
+                            # Project tools
+                            Prefetch(
+                                'project_tools',
+                                queryset=ProjectTool.objects.all()
+                            ),
+                            # Lecture-level quizzes - using the correct relationship name
+                            Prefetch(
+                                'quizzes',  # This is the correct related_name from the Quiz model
+                                queryset=Quiz.objects.prefetch_related(
+                                    Prefetch(
+                                        'questions',
+                                        queryset=QuizQuestion.objects.order_by('order')
+                                    ),
+                                    Prefetch(
+                                        'tasks',
+                                        queryset=QuizTask.objects.order_by('order')
+                                    )
+                                )
+                            )
+                        )
+                    ),
+                    # Section-level quizzes
+                    Prefetch(
+                        'quizzes',  # CourseSection also has related_name='quizzes'
+                        queryset=Quiz.objects.prefetch_related(
+                            Prefetch(
+                                'questions',
+                                queryset=QuizQuestion.objects.order_by('order')
+                            ),
+                            Prefetch(
+                                'tasks',
+                                queryset=QuizTask.objects.order_by('order')
+                            )
+                        )
+                    )
+                )
+            ),
+            # Course-level quizzes
+            Prefetch(
+                'quizzes',  # Course also has related_name='quizzes'
+                queryset=Quiz.objects.prefetch_related(
+                    Prefetch(
+                        'questions',
+                        queryset=QuizQuestion.objects.order_by('order')
+                    ),
+                    Prefetch(
+                        'tasks',
+                        queryset=QuizTask.objects.order_by('order')
+                    )
+                )
+            )
+        )
+        
+        # Filter based on user authentication and permissions
+        if not self.request.user.is_authenticated:
+            # Non-authenticated users can only see published and active courses
+            return queryset.filter(is_published=True, is_active=True)
+        
+        # Authenticated non-admin users can only see published courses
+        if not (self.request.user.is_staff or self.request.user.is_superuser):
+            return queryset.filter(is_published=True)
+        
+        # Admin users can see all courses
+        return queryset
 
     def get_serializer_context(self):
+        """Add request context for user-specific data like enrollment status"""
         context = super().get_serializer_context()
         context['request'] = self.request
+        context['include_full_details'] = True
         return context
 
+    def retrieve(self, request, *args, **kwargs):
+        """
+        Override retrieve to add additional course statistics and data
+        that might be expensive to compute in serializers.
+        """
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        
+        # Add any additional real-time data if needed
+        data = serializer.data
+        
+        # You can add more computed fields here if needed
+        # For example, recent activity, popular lectures, etc.
+        
+        return Response(data)
+
+
+class CourseContentView(generics.RetrieveAPIView):
+    """
+    Alternative endpoint that returns only course content structure
+    (sections and lectures) without all the detailed nested data.
+    Useful for course navigation/sidebar components.
+    """
+    serializer_class = CourseDetailSerializer
+    permission_classes = []
+    lookup_field = 'slug'
+    lookup_url_kwarg = 'slug'
+
+    def get_queryset(self):
+        """Lighter queryset for content structure only"""
+        queryset = Course.objects.select_related(
+            'instructor',
+            'category'
+        ).prefetch_related(
+            Prefetch(
+                'sections',
+                queryset=CourseSection.objects.order_by('order').prefetch_related(
+                    Prefetch(
+                        'lectures',
+                        queryset=Lecture.objects.order_by('order').only(
+                            'id', 'title', 'duration', 'order', 'preview_available', 'section'
+                        )
+                    )
+                )
+            )
+        )
+        
+        if not self.request.user.is_authenticated:
+            return queryset.filter(is_published=True, is_active=True)
+        
+        if not (self.request.user.is_staff or self.request.user.is_superuser):
+            return queryset.filter(is_published=True)
+        
+        return queryset
+
+    def retrieve(self, request, *args, **kwargs):
+        """Return only the course structure"""
+        instance = self.get_object()
+        
+        # Create a simplified response
+        data = {
+            'id': instance.id,
+            'title': instance.title,
+            'slug': instance.slug,
+            'sections': []
+        }
+        
+        for section in instance.sections.all():
+            section_data = {
+                'id': section.id,
+                'title': section.title,
+                'order': section.order,
+                'lectures': []
+            }
+            
+            for lecture in section.lectures.all():
+                lecture_data = {
+                    'id': lecture.id,
+                    'title': lecture.title,
+                    'duration': lecture.duration,
+                    'order': lecture.order,
+                    'preview_available': lecture.preview_available,
+                    'is_completed': False  # Calculate based on user progress if needed
+                }
+                section_data['lectures'].append(lecture_data)
+            
+            data['sections'].append(section_data)
+        
+        return Response(data)
+
+
+class CourseStatsView(generics.RetrieveAPIView):
+    """
+    Endpoint that returns comprehensive course statistics.
+    Useful for instructor dashboards or analytics.
+    """
+    permission_classes = []  # Adjust based on your requirements
+    lookup_field = 'slug'
+    lookup_url_kwarg = 'slug'
+
+    def get_queryset(self):
+        return Course.objects.filter(is_published=True, is_active=True)
+
+    def retrieve(self, request, *args, **kwargs):
+        """Return comprehensive course statistics"""
+        course = self.get_object()
+        
+        # Aggregate statistics
+        stats = course.sections.aggregate(
+            total_sections=Count('id'),
+            total_lectures=Count('lectures'),
+            total_duration=Sum('lectures__duration'),
+            total_resources=Count('lectures__resources'),
+            total_qa_items=Count('lectures__qa_items'),
+            total_quizzes=Count('lectures__quiz')
+        )
+        
+        # Add quiz questions and tasks count
+        quiz_stats = Quiz.objects.filter(course=course).aggregate(
+            total_questions=Count('questions'),
+            total_tasks=Count('tasks')
+        )
+        
+        # Combine all stats
+        data = {
+            'course_id': course.id,
+            'course_title': course.title,
+            'sections_count': stats['total_sections'] or 0,
+            'lectures_count': stats['total_lectures'] or 0,
+            'total_duration_minutes': stats['total_duration'] or 0,
+            'resources_count': stats['total_resources'] or 0,
+            'qa_items_count': stats['total_qa_items'] or 0,
+            'quizzes_count': stats['total_quizzes'] or 0,
+            'quiz_questions_count': quiz_stats['total_questions'] or 0,
+            'quiz_tasks_count': quiz_stats['total_tasks'] or 0,
+            'students_enrolled': course.students_enrolled,
+            'rating': course.rating,
+            'review_count': course.review_count,
+        }
+        
+        # Format duration
+        total_minutes = data['total_duration_minutes']
+        hours = total_minutes // 60
+        minutes = total_minutes % 60
+        data['total_duration_formatted'] = f"{hours}h {minutes}min" if hours > 0 else f"{minutes}min"
+        
+        return Response(data)
 
 class CourseSectionViewSet(BaseModelViewSet):
     """
