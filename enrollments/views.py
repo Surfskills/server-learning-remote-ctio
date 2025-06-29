@@ -3,6 +3,18 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.decorators import action
 from django.db.models import Q
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from django.db.models import Count, Sum
+from django.utils import timezone
+from datetime import timedelta
+from enrollments.models import Enrollment, CourseProgress
+from courses.models import Course
+from users.models import UserActivity
+from courses.serializers import CourseSerializer
+from users.serializers import UserActivitySerializer
+
 
 from .models import Enrollment, CourseProgress
 from .serializers import (
@@ -122,3 +134,97 @@ class AdminEnrollmentViewSet(BaseModelViewSet):
             queryset = queryset.filter(enrolled_at__lte=end_date)
             
         return queryset.order_by('-enrolled_at')
+    
+
+
+
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def student_dashboard(request):
+    # Get enrolled courses with progress - use left join to include enrollments without progress
+    enrollments = Enrollment.objects.filter(student=request.user).select_related(
+        'course'
+    ).prefetch_related(
+        'course__sections__lectures',
+        'progress'  # This will be None if no progress exists
+    )
+    
+    enrolled_courses = []
+    for enrollment in enrollments:
+        # Handle missing progress gracefully
+        try:
+            progress = enrollment.progress
+        except CourseProgress.DoesNotExist:
+            # Create progress if it doesn't exist
+            progress = CourseProgress.objects.create(enrollment=enrollment)
+        
+        course = enrollment.course
+        
+        # Calculate progress percentage
+        total_lectures = course.sections.aggregate(
+            total=Count('lectures')
+        )['total'] or 0
+        completed_lectures = progress.completed_lectures.count()
+        progress_percentage = round((completed_lectures / total_lectures) * 100) if total_lectures > 0 else 0
+        
+        enrolled_courses.append({
+            'course': CourseSerializer(course).data,
+            'progress': CourseProgressSerializer(progress).data,
+            'enrollment': EnrollmentSerializer(enrollment).data
+        })
+    
+    # Get learning stats
+    total_courses = enrollments.count()
+    completed_courses = enrollments.filter(completed=True).count()
+    
+    # Calculate total learning hours (sum of all course durations)
+    total_hours = enrollments.aggregate(
+        total=Sum('course__duration')
+    )['total'] or 0
+    total_hours = round(total_hours / 60)  # Convert minutes to hours
+    
+    # Get streak (simplified - count consecutive days with activity)
+    today = timezone.now().date()
+    streak_days = 0
+    current_date = today
+    while UserActivity.objects.filter(
+        user=request.user,
+        created_at__date=current_date
+    ).exists():
+        streak_days += 1
+        current_date -= timedelta(days=1)
+    
+    # Get badges/achievements (simplified)
+    badges = []
+    if completed_courses > 0:
+        badges.append({
+            'id': '1',
+            'name': 'First Course Completed',
+            'description': 'Completed your first course',
+            'imageUrl': '',
+            'earnedDate': timezone.now().isoformat(),
+            'category': 'milestone'
+        })
+    
+    # Get recent activity
+    recent_activity = UserActivity.objects.filter(
+        user=request.user
+    ).order_by('-created_at')[:5]
+    
+    data = {
+        'enrolled_courses': enrolled_courses,
+        'badges': badges,
+        'stats': {
+            'total_courses': total_courses,
+            'completed_courses': completed_courses,
+            'total_hours': total_hours,
+            'streak_days': streak_days,
+            'total_points': request.user.extended_profile.points or 0,
+            'leaderboard_rank': None  # Implement leaderboard logic if needed
+        },
+        'recent_activity': UserActivitySerializer(recent_activity, many=True).data
+    }
+    
+    return Response(data)

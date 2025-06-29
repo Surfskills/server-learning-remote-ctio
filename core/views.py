@@ -6,7 +6,9 @@ from django.utils import timezone
 
 from authentication.models import User
 from courses.models import Course
+from courses.serializers import CourseSerializer
 from enrollments.models import Enrollment
+from enrollments.serializers import CourseProgressSerializer, EnrollmentSerializer
 from planning.models import CalendarEvent
 from .models import HealthCheck
 from .serializers import HealthCheckSerializer
@@ -214,3 +216,4 @@ def admin_stats(request):
             {'error': f'Failed to fetch admin stats: {str(e)}'}, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+#

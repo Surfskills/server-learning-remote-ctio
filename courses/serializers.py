@@ -229,7 +229,70 @@ class CourseSerializer(serializers.ModelSerializer):
                 return False
         return False
 
+class CourseListSerializer(serializers.ModelSerializer):
+    instructor = InstructorSerializer(read_only=True)
+    category = CourseCategorySerializer(read_only=True)
+    is_enrolled = serializers.SerializerMethodField()
+    progress_percentage = serializers.SerializerMethodField()
+    total_lectures = serializers.SerializerMethodField()
+    completed_lectures = serializers.SerializerMethodField()
+    duration_hours = serializers.SerializerMethodField()
 
+    class Meta:
+        model = Course
+        fields = [
+            'id',
+            'title',
+            'description',
+            'level',
+            'language',
+            'price',
+            'instructor',
+            'category',
+            'slug',
+            'banner_url',
+            'duration',
+            'duration_hours',
+            'rating',
+            'review_count',
+            'students_enrolled',
+            'is_enrolled',
+            'progress_percentage',
+            'total_lectures',
+            'completed_lectures',
+            'created_at'
+        ]
+        read_only_fields = fields
+
+    def get_is_enrolled(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return obj.enrollments.filter(student=request.user).exists()
+        return False
+
+    def get_progress_percentage(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            enrollment = obj.enrollments.filter(student=request.user).first()
+            if enrollment:
+                return enrollment.progress_percentage
+        return 0
+
+    def get_total_lectures(self, obj):
+        return obj.lectures.count()
+
+    def get_completed_lectures(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            enrollment = obj.enrollments.filter(student=request.user).first()
+            if enrollment and hasattr(enrollment, 'progress'):
+                return enrollment.progress.completed_lectures.count()
+        return 0
+
+    def get_duration_hours(self, obj):
+        if obj.duration:
+            return round(obj.duration / 60, 1)
+        return 0
 
 class AdminCourseSerializer(CourseSerializer):
     """Extended serializer for admin views with additional fields"""
@@ -671,3 +734,48 @@ class CourseDetailSerializer(serializers.ModelSerializer):
     
     def get_sections_count(self, obj):
         return obj.sections.count()
+    
+class QaItemSerializer(serializers.ModelSerializer):
+    asked_by = UserSerializer(read_only=True)
+    
+    class Meta:
+        model = QaItem
+        fields = ['id', 'question', 'answer', 'upvotes', 'resolved', 'created_at', 'asked_by', 'lecture']
+        read_only_fields = ['lecture', 'asked_by', 'upvotes']
+
+class FullQaItemSerializer(QaItemSerializer):
+    """Full Q&A serializer with all details for enrolled users"""
+    asked_by = UserSerializer(read_only=True)
+    lecture = serializers.SerializerMethodField()
+    
+    class Meta(QaItemSerializer.Meta):
+        fields = QaItemSerializer.Meta.fields  # Just use the same fields since we already included lecture
+    
+    def get_lecture(self, obj):
+        return {
+            'id': obj.lecture.id,
+            'title': obj.lecture.title,
+            'section': {
+                'id': obj.lecture.section.id,
+                'title': obj.lecture.section.title
+            }
+        }
+
+class QuizSerializer(serializers.ModelSerializer):
+    questions = QuizQuestionSerializer(many=True, read_only=True)
+    tasks = QuizTaskSerializer(many=True, read_only=True)
+    
+    class Meta:
+        model = Quiz
+        fields = ['id', 'title', 'description', 'instructions', 'points_possible', 
+                 'due_date', 'is_published', 'allow_multiple_attempts', 
+                 'max_attempts', 'time_limit_minutes', 'questions', 'tasks']
+        read_only_fields = ['course', 'section', 'lecture']
+
+class FullQuizSerializer(QuizSerializer):
+    """Full quiz serializer with questions and tasks for enrolled users"""
+    questions = QuizQuestionSerializer(many=True, read_only=True)
+    tasks = QuizTaskSerializer(many=True, read_only=True)
+    
+    class Meta(QuizSerializer.Meta):
+        fields = QuizSerializer.Meta.fields  # Just use the same fields since we already included questions/tasks

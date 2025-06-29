@@ -8,6 +8,7 @@ from django.db import transaction, OperationalError, IntegrityError
 from django.shortcuts import get_object_or_404
 import time
 from django.db import models
+from django.core.exceptions import PermissionDenied
 
 from authentication.serializers import UserSerializer  # Add this import
 
@@ -129,7 +130,7 @@ class CourseViewSet(BaseModelViewSet, CourseFilterMixin):
     def enroll(self, request, pk=None):
         def _enroll():
             course = self.get_object()
-            from enrollments.models import Enrollment, CourseProgress
+            from users.models.enrollment import Enrollment
             
             if Enrollment.objects.filter(student=request.user, course=course).exists():
                 return error_response('Already enrolled', status_code=status.HTTP_400_BAD_REQUEST)
@@ -1335,3 +1336,233 @@ class QuizTaskViewSet(BaseModelViewSet):
                 serializer.save(quiz=quiz, order=new_order)
         
         return execute_with_retry(_perform_create)
+
+
+class CourseQAItemsView(generics.ListAPIView):
+    """
+    Get all Q&A items for a course - only for enrolled users
+    """
+    serializer_class = QaItemSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        course_slug = self.kwargs.get('slug')
+        course = get_object_or_404(Course, slug=course_slug)
+        
+        # Check if user is enrolled
+        from enrollments.models import Enrollment
+        if not Enrollment.objects.filter(student=self.request.user, course=course).exists():
+            return QaItem.objects.none()
+        
+        return QaItem.objects.filter(
+            lecture__section__course=course
+        ).select_related('asked_by', 'lecture').order_by('-created_at')
+
+#-----------------------------------------------------------#
+
+class CourseQuizzesView(generics.ListAPIView):
+    """
+    Get all quizzes for a course with questions and tasks - only for enrolled users
+    """
+    serializer_class = QuizSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        course_slug = self.kwargs.get('slug')
+        course = get_object_or_404(Course, slug=course_slug)
+        
+        # Check if user is enrolled
+        from enrollments.models import Enrollment
+        if not Enrollment.objects.filter(student=self.request.user, course=course).exists():
+            return Quiz.objects.none()
+        
+        return Quiz.objects.filter(course=course).prefetch_related(
+            Prefetch('questions', queryset=QuizQuestion.objects.order_by('order')),
+            Prefetch('tasks', queryset=QuizTask.objects.order_by('order'))
+        )
+
+
+class LectureQAItemsView(generics.ListCreateAPIView):
+    """
+    Get or create Q&A items for a specific lecture - only for enrolled users
+    """
+    serializer_class = QaItemSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        lecture_id = self.kwargs.get('lecture_id')
+        lecture = get_object_or_404(Lecture, id=lecture_id)
+        
+        # Check if user is enrolled in the course
+        from enrollments.models import Enrollment
+        if not Enrollment.objects.filter(
+            student=self.request.user, 
+            course=lecture.section.course
+        ).exists():
+            return QaItem.objects.none()
+        
+        return QaItem.objects.filter(lecture=lecture).select_related('asked_by').order_by('-created_at')
+    
+    def perform_create(self, serializer):
+        lecture_id = self.kwargs.get('lecture_id')
+        lecture = get_object_or_404(Lecture, id=lecture_id)
+        
+        # Check if user is enrolled
+        from enrollments.models import Enrollment
+        if not Enrollment.objects.filter(
+            student=self.request.user, 
+            course=lecture.section.course
+        ).exists():
+            raise PermissionDenied("You must be enrolled to ask questions")
+        
+        serializer.save(lecture=lecture, asked_by=self.request.user)
+
+
+class LectureQuizView(generics.RetrieveAPIView):
+    """
+    Get quiz for a specific lecture with questions and tasks - only for enrolled users
+    """
+    serializer_class = QuizSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_object(self):
+        lecture_id = self.kwargs.get('lecture_id')
+        lecture = get_object_or_404(Lecture, id=lecture_id)
+        
+        # Check if user is enrolled
+        from enrollments.models import Enrollment
+        if not Enrollment.objects.filter(
+            student=self.request.user, 
+            course=lecture.section.course
+        ).exists():
+            raise PermissionDenied("You must be enrolled to access quizzes")
+        
+        return get_object_or_404(
+            Quiz.objects.prefetch_related(
+                Prefetch('questions', queryset=QuizQuestion.objects.order_by('order')),
+                Prefetch('tasks', queryset=QuizTask.objects.order_by('order'))
+            ),
+            lecture=lecture
+        )
+
+
+# Enhanced serializers that include full data
+class FullQaItemSerializer(QaItemSerializer):
+    """Full Q&A serializer with all details for enrolled users"""
+    asked_by = UserSerializer(read_only=True)
+    lecture = serializers.SerializerMethodField()
+    
+    class Meta(QaItemSerializer.Meta):
+        fields = QaItemSerializer.Meta.fields + ['lecture']
+    
+    def get_lecture(self, obj):
+        return {
+            'id': obj.lecture.id,
+            'title': obj.lecture.title,
+            'section': {
+                'id': obj.lecture.section.id,
+                'title': obj.lecture.section.title
+            }
+        }
+
+
+class FullQuizSerializer(QuizSerializer):
+    """Full quiz serializer with questions and tasks for enrolled users"""
+    questions = QuizQuestionSerializer(many=True, read_only=True)
+    tasks = QuizTaskSerializer(many=True, read_only=True)
+    
+    class Meta(QuizSerializer.Meta):
+        fields = QuizSerializer.Meta.fields + ['questions', 'tasks']
+
+class EnrolledCourseDetailView(generics.RetrieveAPIView):
+    """
+    Comprehensive course details for enrolled users only
+    Includes all content, Q&A, quizzes with questions/tasks
+    """
+    serializer_class = CourseDetailSerializer
+    permission_classes = [IsAuthenticated]
+    lookup_field = 'slug'
+    lookup_url_kwarg = 'slug'
+
+    def get_queryset(self):
+        # Only return courses the user is enrolled in
+        from enrollments.models import Enrollment
+        return Course.objects.filter(
+            enrollments__student=self.request.user
+        ).prefetch_related(
+            'sections__lectures__resources',
+            'sections__lectures__qa_items',
+            'sections__lectures__project_tools',
+            'sections__lectures__quiz__questions',
+            'sections__lectures__quiz__tasks'
+        )
+
+class UserCourseProgressView(generics.RetrieveAPIView):
+    """
+    Returns user's progress in a specific course
+    """
+    serializer_class = serializers.Serializer  # We'll use a custom response
+    permission_classes = [IsAuthenticated]
+    lookup_field = 'slug'
+    lookup_url_kwarg = 'slug'
+
+    def get(self, request, *args, **kwargs):
+        course = self.get_object()
+        
+        try:
+            from enrollments.models import Enrollment
+            enrollment = Enrollment.objects.get(
+                student=request.user,
+                course=course
+            )
+            
+            # Calculate progress
+            total_lectures = course.sections.aggregate(
+                total=models.Count('lectures')
+            )['total'] or 0
+            
+            completed_lectures = enrollment.progress.completed_lectures.count()
+            progress_percent = round((completed_lectures / total_lectures) * 100 if total_lectures > 0 else 0)
+            
+            # Get time spent
+            time_spent_minutes = enrollment.progress.time_spent_minutes
+            
+            return Response({
+                'course_id': course.id,
+                'course_title': course.title,
+                'total_lectures': total_lectures,
+                'completed_lectures': completed_lectures,
+                'progress_percent': progress_percent,
+                'time_spent_minutes': time_spent_minutes,
+                'last_accessed': enrollment.progress.last_accessed
+            })
+            
+        except Enrollment.DoesNotExist:
+            return Response(
+                {'detail': 'You are not enrolled in this course'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+    def get_queryset(self):
+        return Course.objects.all()
+
+class UserCourseQAView(generics.ListAPIView):
+    """
+    Returns all Q&A items contributed by the current user in a course
+    """
+    serializer_class = FullQaItemSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        course_slug = self.kwargs.get('slug')
+        course = get_object_or_404(Course, slug=course_slug)
+        
+        # Verify enrollment
+        from enrollments.models import Enrollment
+        if not Enrollment.objects.filter(student=self.request.user, course=course).exists():
+            raise PermissionDenied("You must be enrolled to view your Q&A")
+        
+        return QaItem.objects.filter(
+            lecture__section__course=course,
+            asked_by=self.request.user
+        ).select_related('lecture', 'lecture__section').order_by('-created_at')

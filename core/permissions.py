@@ -1,6 +1,10 @@
 from rest_framework import permissions
 from rest_framework.permissions import BasePermission
 
+from courses.models import Course
+from enrollments.models import Enrollment
+
+
 
 class IsAdminUser(BasePermission):
     """
@@ -92,10 +96,27 @@ class IsEnrolledStudent(BasePermission):
     Allows access only if user is enrolled in the course.
     """
     def has_object_permission(self, request, view, obj):
-        from enrollments.models import Enrollment
+        if not request.user or not request.user.is_authenticated:
+            return False
+        
+        # Get the course from the object
+        course = None
+        
+        # If object is a Course
+        if hasattr(obj, 'instructor'):
+            course = obj
+        # If object has a direct course attribute
+        elif hasattr(obj, 'course'):
+            course = obj.course
+        # If object is a Lecture (access through section)
+        elif hasattr(obj, 'section') and hasattr(obj.section, 'course'):
+            course = obj.section.course
+        else:
+            return False
+            
         return Enrollment.objects.filter(
             student=request.user, 
-            course=obj if hasattr(obj, 'instructor') else obj.course
+            course=course
         ).exists()
 
 
@@ -116,15 +137,11 @@ class IsCourseEnrolled(BasePermission):
             return False
         
         try:
-            from courses.models import Course
-            from enrollments.models import Enrollment
-            
             course = Course.objects.get(pk=course_pk)
             # Check if user is enrolled in the course
             return Enrollment.objects.filter(
                 student=request.user,
-                course=course,
-                is_active=True  # Assuming you have an is_active field
+                course=course
             ).exists()
         except Course.DoesNotExist:
             return False
@@ -133,14 +150,11 @@ class IsCourseEnrolled(BasePermission):
         if not request.user or not request.user.is_authenticated:
             return False
         
-        from enrollments.models import Enrollment
-        
         # If the object has a course attribute, check enrollment
         if hasattr(obj, 'course'):
             return Enrollment.objects.filter(
                 student=request.user,
-                course=obj.course,
-                is_active=True
+                course=obj.course
             ).exists()
         
         return True
@@ -168,7 +182,7 @@ class CanAccessCourseContent(BasePermission):
     Allows access to:
     - Admin users (staff/superuser)
     - Course instructors
-    - Enrolled students
+    - Enrolled students (any authenticated user enrolled in the course)
     """
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
@@ -182,14 +196,21 @@ class CanAccessCourseContent(BasePermission):
         if not course_id:
             return False
         
-        # Check if user is the course instructor
-        if getattr(request.user, 'user_type', None) == 'INSTRUCTOR':
-            from courses.models import Course
-            return Course.objects.filter(id=course_id, instructor=request.user).exists()
-        
-        # Check if user is enrolled in the course
-        from enrollments.models import Enrollment
-        return Enrollment.objects.filter(course_id=course_id, student=request.user).exists()
+        try:
+            course = Course.objects.get(id=course_id)
+            
+            # Check if user is the course instructor
+            if course.instructor == request.user:
+                return True
+            
+            # Check if any authenticated user is enrolled in the course
+            return Enrollment.objects.filter(
+                course=course, 
+                student=request.user
+            ).exists()
+            
+        except Course.DoesNotExist:
+            return False
 
     def has_object_permission(self, request, view, obj):
         if not request.user or not request.user.is_authenticated:
@@ -199,16 +220,126 @@ class CanAccessCourseContent(BasePermission):
         if request.user.is_staff or request.user.is_superuser:
             return True
         
-        # Get the course from the object
-        course = obj if hasattr(obj, 'instructor') else obj.course
+        # Get the course from the object - FIXED VERSION
+        course = self._get_course_from_object(obj)
+        
+        if not course:
+            return False
         
         # Check if user is the course instructor
         if course.instructor == request.user:
             return True
         
-        # Check if user is enrolled
-        from enrollments.models import Enrollment
-        return Enrollment.objects.filter(course=course, student=request.user).exists()
+        # Check if any authenticated user is enrolled
+        return Enrollment.objects.filter(
+            course=course, 
+            student=request.user
+        ).exists()
+    
+    def _get_course_from_object(self, obj):
+        """
+        Extract course from various object types with proper error handling
+        """
+        # Direct course object
+        if hasattr(obj, 'instructor'):
+            return obj
+        
+        # Objects with direct course attribute
+        if hasattr(obj, 'course'):
+            return obj.course
+        
+        # Lecture objects - access through section
+        if hasattr(obj, 'section') and hasattr(obj.section, 'course'):
+            return obj.section.course
+        
+        # For objects with enrollment
+        if hasattr(obj, 'enrollment') and hasattr(obj.enrollment, 'course'):
+            return obj.enrollment.course
+        
+        return None
+
+
+class CanAccessEnrolledCourses(BasePermission):
+    """
+    Permission that allows any authenticated user to access courses they are enrolled in.
+    This is a general permission for course access based on enrollment.
+    """
+    message = "You must be enrolled in this course to access it."
+
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+            
+        # Admin users have full access
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+        
+        # Get course_pk from URL kwargs
+        course_pk = view.kwargs.get('course_pk') or view.kwargs.get('pk')
+        if not course_pk:
+            return True  # Let it pass to object-level permission
+        
+        try:
+            course = Course.objects.get(pk=course_pk)
+            
+            # Check if user is the course instructor
+            if course.instructor == request.user:
+                return True
+            
+            # Check if authenticated user is enrolled in the course
+            return Enrollment.objects.filter(
+                course=course,
+                student=request.user
+            ).exists()
+            
+        except Course.DoesNotExist:
+            return False
+
+    def has_object_permission(self, request, view, obj):
+        if not request.user or not request.user.is_authenticated:
+            return False
+            
+        # Admin users have full access
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+        
+        # Get the course from the object - FIXED VERSION
+        course = self._get_course_from_object(obj)
+        
+        if not course:
+            return False
+        
+        # Check if user is the course instructor
+        if course.instructor == request.user:
+            return True
+        
+        # Check if authenticated user is enrolled
+        return Enrollment.objects.filter(
+            course=course,
+            student=request.user
+        ).exists()
+    
+    def _get_course_from_object(self, obj):
+        """
+        Extract course from various object types with proper error handling
+        """
+        # Direct course object
+        if hasattr(obj, 'instructor'):
+            return obj
+        
+        # Objects with direct course attribute
+        if hasattr(obj, 'course'):
+            return obj.course
+        
+        # Lecture objects - access through section
+        if hasattr(obj, 'section') and hasattr(obj.section, 'course'):
+            return obj.section.course
+        
+        # For objects with enrollment
+        if hasattr(obj, 'enrollment') and hasattr(obj.enrollment, 'course'):
+            return obj.enrollment.course
+        
+        return None
 
 
 # === NEW CALENDAR APP SPECIFIC PERMISSIONS ===
@@ -221,7 +352,7 @@ class CanAccessCalendarEvent(BasePermission):
     - Event creators
     - Event attendees
     - Course instructors (for course events)
-    - Enrolled students (for course events)
+    - Enrolled students (for course events) - any authenticated user enrolled
     """
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
@@ -255,9 +386,11 @@ class CanAccessCalendarEvent(BasePermission):
             if obj.course.instructor == request.user:
                 return True
                 
-            # Check if user is enrolled in the course
-            from enrollments.models import Enrollment
-            if Enrollment.objects.filter(course=obj.course, student=request.user, is_active=True).exists():
+            # Check if any authenticated user is enrolled in the course
+            if Enrollment.objects.filter(
+                course=obj.course, 
+                student=request.user
+            ).exists():
                 return True
         
         return False
@@ -270,7 +403,7 @@ class CanAccessContentReleaseSchedule(BasePermission):
     - Admin users (staff/superuser)
     - Course instructors
     - Schedule creators
-    - Enrolled students (read-only)
+    - Enrolled students (read-only) - any authenticated user enrolled
     """
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
@@ -298,10 +431,12 @@ class CanAccessContentReleaseSchedule(BasePermission):
         if obj.course.instructor == request.user:
             return True
         
-        # Check if user is enrolled in the course (read-only access)
+        # Check if any authenticated user is enrolled in the course (read-only access)
         if request.method in permissions.SAFE_METHODS:
-            from enrollments.models import Enrollment
-            if Enrollment.objects.filter(course=obj.course, student=request.user, is_active=True).exists():
+            if Enrollment.objects.filter(
+                course=obj.course, 
+                student=request.user
+            ).exists():
                 return True
         
         return False
@@ -314,7 +449,7 @@ class CanAccessContentReleaseRule(BasePermission):
     - Admin users (staff/superuser)
     - Course instructors
     - Schedule creators
-    - Enrolled students (read-only)
+    - Enrolled students (read-only) - any authenticated user enrolled
     """
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
@@ -342,10 +477,12 @@ class CanAccessContentReleaseRule(BasePermission):
         if obj.schedule.course.instructor == request.user:
             return True
         
-        # Check if user is enrolled in the course (read-only access)
+        # Check if any authenticated user is enrolled in the course (read-only access)
         if request.method in permissions.SAFE_METHODS:
-            from enrollments.models import Enrollment
-            if Enrollment.objects.filter(course=obj.schedule.course, student=request.user, is_active=True).exists():
+            if Enrollment.objects.filter(
+                course=obj.schedule.course, 
+                student=request.user
+            ).exists():
                 return True
         
         return False
@@ -431,3 +568,203 @@ class CanManageCalendarNotifications(BasePermission):
         
         # Users can only manage their own notifications
         return obj.user == request.user
+
+
+# core/permissions.py
+
+from rest_framework import permissions
+from django.db.models import Q
+
+class CanViewEnrollmentProgress(permissions.BasePermission):
+    """
+    Custom permission to only allow users to view enrollment progress
+    for their own enrollments or courses they instruct.
+    """
+    
+    def has_permission(self, request, view):
+        # Must be authenticated
+        return request.user and request.user.is_authenticated
+    
+    def has_object_permission(self, request, view, obj):
+        # Allow superusers and staff to access everything
+        if request.user.is_superuser or request.user.is_staff:
+            return True
+        
+        # Get the course based on the object type
+        course = self._get_course_from_object(obj)
+        
+        if course is None:
+            return False
+        
+        # Check if user is the instructor of the course
+        if hasattr(course, 'instructor') and course.instructor == request.user:
+            return True
+        
+        # Check if user has an enrollment for this course
+        from users.models import Enrollment  # Import here to avoid circular imports
+        return Enrollment.objects.filter(
+            student=request.user,
+            course=course
+        ).exists()
+    
+    def _get_course_from_object(self, obj):
+        """
+        Extract the course from different object types - FIXED VERSION
+        """
+        # Direct course access
+        if hasattr(obj, 'course'):
+            return obj.course
+        
+        # For Lecture objects - access through section
+        if hasattr(obj, 'section') and hasattr(obj.section, 'course'):
+            return obj.section.course
+        
+        # For Enrollment objects
+        if hasattr(obj, 'enrollment') and hasattr(obj.enrollment, 'course'):
+            return obj.enrollment.course
+        
+        # For objects that ARE courses
+        if hasattr(obj, 'instructor'):  # Assuming Course has instructor field
+            return obj
+        
+        # For CourseProgress objects
+        if hasattr(obj, 'enrollment'):
+            return getattr(obj.enrollment, 'course', None)
+        
+        # For Section objects - try to get course directly or via course_id
+        if hasattr(obj, 'course_id') and not hasattr(obj, 'course'):
+            try:
+                from courses.models import Course
+                return Course.objects.get(id=obj.course_id)
+            except (Course.DoesNotExist, AttributeError):
+                pass
+        
+        return None
+
+
+# Alternative implementation with more explicit object type checking
+class CanViewEnrollmentProgressDetailed(permissions.BasePermission):
+    """
+    More detailed version with explicit object type checking - FIXED VERSION
+    """
+    
+    def has_permission(self, request, view):
+        return request.user and request.user.is_authenticated
+    
+    def has_object_permission(self, request, view, obj):
+        if request.user.is_superuser or request.user.is_staff:
+            return True
+        
+        # Import models here to avoid circular imports
+        from users.models import Enrollment
+        from courses.models import Course, Section, Lecture
+        
+        course = None
+        
+        # Determine object type and extract course
+        if isinstance(obj, Course):
+            course = obj
+        elif isinstance(obj, Enrollment):
+            course = obj.course
+        elif isinstance(obj, Section):
+            course = obj.course
+        elif isinstance(obj, Lecture):
+            # FIXED: Lecture objects access course through section
+            if hasattr(obj, 'section') and hasattr(obj.section, 'course'):
+                course = obj.section.course
+        elif hasattr(obj, 'enrollment'):  # CourseProgress
+            course = obj.enrollment.course
+        elif hasattr(obj, 'course'):  # Generic objects with course attribute
+            course = obj.course
+        
+        if course is None:
+            return False
+        
+        # Check if user is the instructor
+        if hasattr(course, 'instructor') and course.instructor == request.user:
+            return True
+        
+        # Check if user is enrolled in the course
+        return Enrollment.objects.filter(
+            student=request.user,
+            course=course
+        ).exists()
+
+
+# If you want to add logging for debugging
+class CanViewEnrollmentProgressWithLogging(permissions.BasePermission):
+    """
+    Version with logging for debugging permission issues - FIXED VERSION
+    """
+    
+    def has_permission(self, request, view):
+        return request.user and request.user.is_authenticated
+    
+    def has_object_permission(self, request, view, obj):
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        logger.debug(f"Checking permission for user {request.user} on object {obj} (type: {type(obj)})")
+        
+        if request.user.is_superuser or request.user.is_staff:
+            logger.debug("Permission granted: User is superuser/staff")
+            return True
+        
+        try:
+            course = self._get_course_from_object(obj)
+            logger.debug(f"Extracted course: {course}")
+            
+            if course is None:
+                logger.debug("Permission denied: Could not extract course from object")
+                return False
+            
+            # Check instructor
+            if hasattr(course, 'instructor') and course.instructor == request.user:
+                logger.debug("Permission granted: User is course instructor")
+                return True
+            
+            # Check enrollment
+            from users.models import Enrollment
+            is_enrolled = Enrollment.objects.filter(
+                student=request.user,
+                course=course
+            ).exists()
+            
+            if is_enrolled:
+                logger.debug("Permission granted: User is enrolled in course")
+                return True
+            else:
+                logger.debug("Permission denied: User is not enrolled in course")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error in permission check: {e}")
+            return False
+    
+    def _get_course_from_object(self, obj):
+        """Extract course from object with error handling - FIXED VERSION"""
+        try:
+            # Direct course access
+            if hasattr(obj, 'course'):
+                return obj.course
+            
+            # Lecture -> Section -> Course (FIXED)
+            if hasattr(obj, 'section'):
+                if hasattr(obj.section, 'course'):
+                    return obj.section.course
+            
+            # Enrollment -> Course
+            if hasattr(obj, 'enrollment'):
+                if hasattr(obj.enrollment, 'course'):
+                    return obj.enrollment.course
+            
+            # Object is a course itself
+            if hasattr(obj, 'instructor'):
+                return obj
+                
+        except AttributeError as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"AttributeError in _get_course_from_object: {e}")
+        
+        return None

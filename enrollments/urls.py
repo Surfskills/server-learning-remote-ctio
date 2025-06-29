@@ -7,6 +7,8 @@ router.register(r'enrollments', views.EnrollmentViewSet, basename='enrollments')
 router.register(r'admin-enrollments', views.AdminEnrollmentViewSet, basename='admin-enrollments')
 router.register(r'progress', views.CourseProgressViewSet, basename='progress')
 
+
 urlpatterns = [
     path('', include(router.urls)),
+    path('student/dashboard/', views.student_dashboard, name='student-dashboard'),
 ]

@@ -18,7 +18,7 @@ class UserProfile(BaseModel):
     experience = models.JSONField(default=list, blank=True)
     social_links = models.JSONField(default=dict, blank=True)
     metadata = models.JSONField(default=dict, blank=True)
-
+    points = models.PositiveIntegerField(default=0)
     def __str__(self):
         return f"Extended Profile for {self.user.email}"
 
