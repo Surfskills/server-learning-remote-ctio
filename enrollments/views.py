@@ -10,7 +10,7 @@ from django.db.models import Count, Sum
 from django.utils import timezone
 from datetime import timedelta
 from enrollments.models import Enrollment, CourseProgress
-from courses.models import Course, Lecture  # ✅ Add Lecture import here
+from courses.models import Course, Lecture
 from users.models import UserActivity
 from courses.serializers import CourseSerializer
 from users.serializers import UserActivitySerializer
@@ -108,10 +108,7 @@ class CourseProgressViewSet(BaseModelViewSet):
                 )
                 # Get or create the CourseProgress
                 progress, created = CourseProgress.objects.get_or_create(
-                    enrollment=enrollment,
-                    defaults={
-                        'progress_percentage': 0,
-                    }
+                    enrollment=enrollment
                 )
                 return progress
             except Enrollment.DoesNotExist:
@@ -130,24 +127,50 @@ class CourseProgressViewSet(BaseModelViewSet):
             if lecture.section.course != progress.enrollment.course:
                 return error_response('Lecture does not belong to this course', status_code=status.HTTP_400_BAD_REQUEST)
             
-            # Add the lecture to completed lectures
+            # Add the lecture to completed lectures (signal will update progress automatically)
             progress.completed_lectures.add(lecture)
             
-            # The progress_percentage property will calculate automatically
-            # Let's get the updated values after saving
-            progress.refresh_from_db()
-            
-            # Get counts for response
-            completed_count = progress.completed_lectures.count()
-            total_lectures = 0
-            for section in progress.enrollment.course.sections.all():
-                total_lectures += section.lectures.count()
+            # Get updated progress stats
+            progress_stats = progress.get_progress_stats()
             
             response_data = {
-                'progress_percentage': progress.progress_percentage,
-                'completed_lectures_count': completed_count,
-                'total_lectures': total_lectures,
+                'progress_percentage': progress_stats['progress_percentage'],
+                'completed_lectures_count': progress_stats['completed_lectures'],
+                'total_lectures': progress_stats['total_lectures'],
+                'remaining_lectures': progress_stats['remaining_lectures'],
                 'message': 'Lecture marked as completed'
+            }
+            
+            return Response(response_data, status=status.HTTP_200_OK)
+        except Lecture.DoesNotExist:
+            return error_response('Lecture not found', status_code=status.HTTP_404_NOT_FOUND)
+
+    @action(detail=True, methods=['post'])
+    def uncomplete_lecture(self, request, pk=None):
+        """Remove a lecture from completed lectures"""
+        progress = self.get_object()
+        lecture_id = request.data.get('lecture_id')
+        
+        if not lecture_id:
+            return error_response('lecture_id is required', status_code=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            lecture = Lecture.objects.get(pk=lecture_id)
+            if lecture.section.course != progress.enrollment.course:
+                return error_response('Lecture does not belong to this course', status_code=status.HTTP_400_BAD_REQUEST)
+            
+            # Remove the lecture from completed lectures (signal will update progress automatically)
+            progress.completed_lectures.remove(lecture)
+            
+            # Get updated progress stats
+            progress_stats = progress.get_progress_stats()
+            
+            response_data = {
+                'progress_percentage': progress_stats['progress_percentage'],
+                'completed_lectures_count': progress_stats['completed_lectures'],
+                'total_lectures': progress_stats['total_lectures'],
+                'remaining_lectures': progress_stats['remaining_lectures'],
+                'message': 'Lecture marked as incomplete'
             }
             
             return Response(response_data, status=status.HTTP_200_OK)
@@ -190,7 +213,7 @@ def student_dashboard(request):
         'course'
     ).prefetch_related(
         'course__sections__lectures',
-        'progress'  # This will be None if no progress exists
+        'progress'
     )
     
     enrolled_courses = []
@@ -204,17 +227,14 @@ def student_dashboard(request):
         
         course = enrollment.course
         
-        # Calculate progress percentage
-        total_lectures = course.sections.aggregate(
-            total=Count('lectures')
-        )['total'] or 0
-        completed_lectures = progress.completed_lectures.count()
-        progress_percentage = round((completed_lectures / total_lectures) * 100) if total_lectures > 0 else 0
+        # Get progress stats using the new method
+        progress_stats = progress.get_progress_stats()
         
         enrolled_courses.append({
             'course': CourseSerializer(course).data,
             'progress': CourseProgressSerializer(progress).data,
-            'enrollment': EnrollmentSerializer(enrollment).data
+            'enrollment': EnrollmentSerializer(enrollment).data,
+            'progress_stats': progress_stats  # Add detailed stats
         })
     
     # Get learning stats
