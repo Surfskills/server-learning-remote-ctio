@@ -10,11 +10,10 @@ from django.db.models import Count, Sum
 from django.utils import timezone
 from datetime import timedelta
 from enrollments.models import Enrollment, CourseProgress
-from courses.models import Course
+from courses.models import Course, Lecture  # ✅ Add Lecture import here
 from users.models import UserActivity
 from courses.serializers import CourseSerializer
 from users.serializers import UserActivitySerializer
-
 
 from .models import Enrollment, CourseProgress
 from .serializers import (
@@ -63,7 +62,6 @@ class EnrollmentViewSet(BaseModelViewSet):
         serializer = self.get_serializer(recent_enrollments, many=True)
         return Response(serializer.data)
 
-
     def get_serializer_class(self):
         if self.action == 'create':
             return EnrollmentCreateSerializer
@@ -89,6 +87,36 @@ class CourseProgressViewSet(BaseModelViewSet):
     def get_queryset(self):
         return CourseProgress.objects.filter(enrollment__student=self.request.user)
 
+    def get_object(self):
+        """
+        Override to handle both CourseProgress ID and Enrollment ID
+        """
+        lookup_value = self.kwargs[self.lookup_field]
+        
+        # First try to get by CourseProgress ID
+        try:
+            return CourseProgress.objects.get(
+                id=lookup_value,
+                enrollment__student=self.request.user
+            )
+        except CourseProgress.DoesNotExist:
+            # If not found, try to get by Enrollment ID
+            try:
+                enrollment = Enrollment.objects.get(
+                    id=lookup_value,
+                    student=self.request.user
+                )
+                # Get or create the CourseProgress
+                progress, created = CourseProgress.objects.get_or_create(
+                    enrollment=enrollment,
+                    defaults={
+                        'progress_percentage': 0,
+                    }
+                )
+                return progress
+            except Enrollment.DoesNotExist:
+                raise CourseProgress.DoesNotExist("No CourseProgress matches the given query.")
+
     @action(detail=True, methods=['post'])
     def complete_lecture(self, request, pk=None):
         progress = self.get_object()
@@ -102,8 +130,27 @@ class CourseProgressViewSet(BaseModelViewSet):
             if lecture.section.course != progress.enrollment.course:
                 return error_response('Lecture does not belong to this course', status_code=status.HTTP_400_BAD_REQUEST)
             
+            # Add the lecture to completed lectures
             progress.completed_lectures.add(lecture)
-            return success_response('Lecture marked as completed')
+            
+            # The progress_percentage property will calculate automatically
+            # Let's get the updated values after saving
+            progress.refresh_from_db()
+            
+            # Get counts for response
+            completed_count = progress.completed_lectures.count()
+            total_lectures = 0
+            for section in progress.enrollment.course.sections.all():
+                total_lectures += section.lectures.count()
+            
+            response_data = {
+                'progress_percentage': progress.progress_percentage,
+                'completed_lectures_count': completed_count,
+                'total_lectures': total_lectures,
+                'message': 'Lecture marked as completed'
+            }
+            
+            return Response(response_data, status=status.HTTP_200_OK)
         except Lecture.DoesNotExist:
             return error_response('Lecture not found', status_code=status.HTTP_404_NOT_FOUND)
 
@@ -134,11 +181,6 @@ class AdminEnrollmentViewSet(BaseModelViewSet):
             queryset = queryset.filter(enrolled_at__lte=end_date)
             
         return queryset.order_by('-enrolled_at')
-    
-
-
-
-
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
