@@ -106,23 +106,89 @@ class CourseViewSet(BaseModelViewSet, CourseFilterMixin):
         if not (self.request.user.is_staff or self.request.user.is_superuser):
             queryset = queryset.filter(is_published=True)
         return queryset
-    
+
+    def create(self, request, *args, **kwargs):
+        print("\n=== INCOMING REQUEST ===")
+        print(f"Content-Type: {request.content_type}")
+        print(f"Data keys: {list(request.data.keys())}")
+        print(f"Files keys: {list(request.FILES.keys())}")
+        print(f"User: {request.user}")
+        
+        # Debug: Check for category_id in both data and POST
+        print(f"category_id in data: {request.data.get('category_id')}")
+        print(f"category_id in POST: {request.POST.get('category_id')}")
+        print("=======================\n")
+
+        # Manually verify category_id exists
+        if 'category_id' not in request.data and 'category_id' not in request.POST:
+            return Response(
+                {"category_id": ["This field is required."]},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Add serializer validation debugging
+        serializer = self.get_serializer(data=request.data)
+        print(f"Serializer is_valid: {serializer.is_valid()}")
+        if not serializer.is_valid():
+            print(f"Serializer errors: {serializer.errors}")
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            # Don't call super().create() - do it manually for better debugging
+            self.perform_create(serializer)
+            headers = self.get_success_headers(serializer.data)
+            return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+        except Exception as e:
+            print(f"Exception during creation: {str(e)}")
+            print(f"Exception type: {type(e)}")
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
     def perform_create(self, serializer):
+        print("\n=== PERFORM CREATE START ===")
+        print("Initial data:", serializer.initial_data)
+        print("Request data:", self.request.data)
+        print("Validated data:", serializer.validated_data)
+        
         def _perform_create():
-            # Check if instructor_id is provided in the data
-            instructor_id = self.request.data.get('instructor_id')
-            
-            if instructor_id:
-                # Admin or staff can assign any instructor
-                if self.request.user.is_staff or self.request.user.is_superuser:
-                    # Let the serializer handle the instructor_id validation and assignment
-                    serializer.save()
+            try:
+                # Get instructor_id from request data
+                instructor_id = self.request.data.get('instructor_id')
+                print(f"Instructor ID from request: {instructor_id}")
+                
+                if instructor_id:
+                    # Admin or staff can assign any instructor
+                    if self.request.user.is_staff or self.request.user.is_superuser:
+                        try:
+                            instructor = User.objects.get(id=instructor_id)
+                            print(f"Found instructor: {instructor}")
+                            serializer.save(instructor=instructor)
+                        except User.DoesNotExist:
+                            print(f"Instructor with ID {instructor_id} not found, using current user")
+                            serializer.save(instructor=self.request.user)
+                    else:
+                        # Regular users can only create courses for themselves
+                        print("Regular user, using current user as instructor")
+                        serializer.save(instructor=self.request.user)
                 else:
-                    # Regular users can only create courses for themselves
+                    # No instructor_id provided, default to current user
+                    print("No instructor_id provided, using current user")
                     serializer.save(instructor=self.request.user)
-            else:
-                # No instructor_id provided, default to current user
-                serializer.save(instructor=self.request.user)
+                
+                print("=== PERFORM CREATE SUCCESS ===")
+                print(f"Created course: {serializer.instance}")
+                print("==============================\n")
+                
+            except Exception as e:
+                print(f"Error in _perform_create: {str(e)}")
+                print(f"Error type: {type(e)}")
+                import traceback
+                traceback.print_exc()
+                raise
         
         return execute_with_retry(_perform_create)
 
@@ -130,7 +196,7 @@ class CourseViewSet(BaseModelViewSet, CourseFilterMixin):
     def enroll(self, request, pk=None):
         def _enroll():
             course = self.get_object()
-            from users.models.enrollment import Enrollment
+            from enrollments.models import Enrollment
             
             if Enrollment.objects.filter(student=request.user, course=course).exists():
                 return error_response('Already enrolled', status_code=status.HTTP_400_BAD_REQUEST)
@@ -333,84 +399,34 @@ class CourseDetailView(generics.RetrieveAPIView):
     permission_classes = []  # Allow public access
     lookup_field = 'slug'  # Use slug for SEO-friendly URLs
     lookup_url_kwarg = 'slug'
-
+    
     def get_queryset(self):
-        """
-        Optimized queryset with all necessary prefetch_related calls
-        to minimize database queries for the comprehensive course detail.
-        """
         queryset = Course.objects.select_related(
             'instructor',
             'category'
         ).prefetch_related(
-            # Sections with lectures and all their related data
             Prefetch(
                 'sections',
                 queryset=CourseSection.objects.order_by('order').prefetch_related(
                     Prefetch(
                         'lectures',
                         queryset=Lecture.objects.order_by('order').prefetch_related(
-                            # Lecture resources
-                            Prefetch(
-                                'resources',
-                                queryset=LectureResource.objects.all()
-                            ),
-                            # Q&A items with user info
-                            Prefetch(
-                                'qa_items',
-                                queryset=QaItem.objects.select_related('asked_by').order_by('-created_at')
-                            ),
-                            # Project tools
-                            Prefetch(
-                                'project_tools',
-                                queryset=ProjectTool.objects.all()
-                            ),
-                            # Lecture-level quizzes - using the correct relationship name
-                            Prefetch(
-                                'quizzes',  # This is the correct related_name from the Quiz model
-                                queryset=Quiz.objects.prefetch_related(
-                                    Prefetch(
-                                        'questions',
-                                        queryset=QuizQuestion.objects.order_by('order')
-                                    ),
-                                    Prefetch(
-                                        'tasks',
-                                        queryset=QuizTask.objects.order_by('order')
-                                    )
-                                )
+                            Prefetch('resources'),
+                            Prefetch('qa_items', queryset=QaItem.objects.select_related('asked_by')),
+                            Prefetch('project_tools'),
+                            Prefetch('quizzes', queryset=Quiz.objects.prefetch_related(
+                                Prefetch('questions', queryset=QuizQuestion.objects.order_by('order')),
+                                Prefetch('tasks', queryset=QuizTask.objects.order_by('order'))
                             )
                         )
                     ),
-                    # Section-level quizzes
-                    Prefetch(
-                        'quizzes',  # CourseSection also has related_name='quizzes'
-                        queryset=Quiz.objects.prefetch_related(
-                            Prefetch(
-                                'questions',
-                                queryset=QuizQuestion.objects.order_by('order')
-                            ),
-                            Prefetch(
-                                'tasks',
-                                queryset=QuizTask.objects.order_by('order')
-                            )
-                        )
                     )
                 )
             ),
-            # Course-level quizzes
-            Prefetch(
-                'quizzes',  # Course also has related_name='quizzes'
-                queryset=Quiz.objects.prefetch_related(
-                    Prefetch(
-                        'questions',
-                        queryset=QuizQuestion.objects.order_by('order')
-                    ),
-                    Prefetch(
-                        'tasks',
-                        queryset=QuizTask.objects.order_by('order')
-                    )
-                )
-            )
+            Prefetch('quizzes', queryset=Quiz.objects.prefetch_related(
+                Prefetch('questions', queryset=QuizQuestion.objects.order_by('order')),
+                Prefetch('tasks', queryset=QuizTask.objects.order_by('order'))
+            ))
         )
         
         # Filter based on user authentication and permissions
@@ -604,91 +620,6 @@ class CourseStatsView(generics.RetrieveAPIView):
         
         return Response(data)
 
-
-# Fixed serializer methods as well
-class CourseDetailSerializer(CourseSerializer):
-    """
-    Extended serializer that includes all nested data for the course detail page.
-    """
-    sections = CourseSectionSerializer(many=True, read_only=True)
-    instructor = UserSerializer(read_only=True)  # You'll need a UserSerializer
-    is_enrolled = serializers.SerializerMethodField()
-    resources_count = serializers.SerializerMethodField()
-    qa_items = serializers.SerializerMethodField()
-    qa_items_count = serializers.SerializerMethodField()
-    project_tools = serializers.SerializerMethodField()
-    project_tools_count = serializers.SerializerMethodField()
-    quiz = serializers.SerializerMethodField()
-    quizzes_count = serializers.SerializerMethodField()
-    has_quiz = serializers.SerializerMethodField()
-    
-    class Meta(CourseSerializer.Meta):
-        fields = CourseSerializer.Meta.fields + [
-            'long_description',
-            'banner_url',
-            'preview_video_url',
-            'sections',
-            'instructor',
-            'is_enrolled',
-            'rating',
-            'review_count',
-            'students_enrolled',
-            'duration',
-            'created_at',
-            'updated_at',
-            'language',
-            'level',
-            'prerequisites',
-            'what_you_will_learn',
-            'who_is_this_for',
-            'certificate_available',
-            'resources_available',
-            'lifetime_access',
-        ]
-    
-    def get_resources_count(self, obj):
-        return obj.sections.aggregate(
-            count=models.Count('lectures__resources')
-        )['count'] or 0
-    
-    def get_qa_items(self, obj):
-        return obj.sections.aggregate(
-            count=models.Count('lectures__qa_items')
-        )['count'] or 0
-    
-    def get_qa_items_count(self, obj):
-        return self.get_qa_items(obj)
-    
-    def get_project_tools(self, obj):
-        return obj.sections.aggregate(
-            count=models.Count('lectures__project_tools')
-        )['count'] or 0
-    
-    def get_project_tools_count(self, obj):
-        return self.get_project_tools(obj)
-    
-    def get_quiz(self, obj):
-        # Count quizzes at all levels
-        lecture_quizzes = obj.sections.aggregate(
-            count=models.Count('lectures__quizzes')  # FIXED: quiz -> quizzes
-        )['count'] or 0
-        
-        section_quizzes = obj.sections.filter(quizzes__isnull=False).count()  # FIXED: quiz -> quizzes
-        course_quizzes = Quiz.objects.filter(course=obj, section__isnull=True, lecture__isnull=True).count()
-        
-        return lecture_quizzes + section_quizzes + course_quizzes
-    
-    def get_quizzes_count(self, obj):
-        return self.get_quiz(obj)
-    
-    def get_has_quiz(self, obj):
-        return self.get_quiz(obj) > 0
-
-    def get_is_enrolled(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            return obj.enrollments.filter(student=request.user).exists()
-        return False
 
 class CourseSectionViewSet(BaseModelViewSet):
     """
@@ -1465,14 +1396,6 @@ class FullQaItemSerializer(QaItemSerializer):
             }
         }
 
-
-class FullQuizSerializer(QuizSerializer):
-    """Full quiz serializer with questions and tasks for enrolled users"""
-    questions = QuizQuestionSerializer(many=True, read_only=True)
-    tasks = QuizTaskSerializer(many=True, read_only=True)
-    
-    class Meta(QuizSerializer.Meta):
-        fields = QuizSerializer.Meta.fields + ['questions', 'tasks']
 
 class EnrolledCourseDetailView(generics.RetrieveAPIView):
     """

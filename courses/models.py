@@ -51,7 +51,7 @@ class Course(BaseModel):
     description = models.TextField()
     long_description = models.TextField(blank=True, null=True)
     banner_url = models.URLField(max_length=500, blank=True, null=True)
-    thumbnail = models.ImageField(upload_to='course_thumbnails/', blank=True, null=True)
+    thumbnail = models.URLField(blank=True, null=True)
     preview_video_url = models.URLField(max_length=500, blank=True, null=True)
     instructor = models.ForeignKey(User, on_delete=models.CASCADE, related_name='courses_taught')
     category = models.ForeignKey('CourseCategory', on_delete=models.SET_NULL, null=True, blank=True, related_name='courses')
@@ -150,10 +150,20 @@ class Course(BaseModel):
             counter += 1
             
         return slug
-
+        
     def save(self, *args, **kwargs):
-        # Generate unique slug if not provided or if title changed
-        if not self.slug or (self.pk and Course.objects.get(pk=self.pk).title != self.title):
+        # Only check for title changes if this is an existing course (has pk and exists in DB)
+        title_changed = False
+        if self.pk:
+            try:
+                old_course = Course.objects.get(pk=self.pk)
+                title_changed = old_course.title != self.title
+            except Course.DoesNotExist:
+                # This handles the edge case where pk exists but object doesn't exist in DB
+                title_changed = True
+        
+        # Generate or update slug if it's a new course, title has changed, or slug is empty
+        if not self.slug or title_changed or not self.pk:
             self.slug = self.generate_unique_slug()
         
         # Handle publication timestamp
@@ -161,6 +171,7 @@ class Course(BaseModel):
             self.published_at = timezone.now()
             
         super().save(*args, **kwargs)
+
 
     @property
     def current_price(self):
@@ -171,6 +182,10 @@ class Course(BaseModel):
         if self.thumbnail:
             return self.thumbnail.url
         return self.banner_url
+    
+    def total_lectures_count(self):
+        """Count all lectures in all sections of this course"""
+        return sum(section.lectures.count() for section in self.sections.all())
 
 class CourseSection(BaseModel):
     course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='sections')
