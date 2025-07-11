@@ -67,8 +67,8 @@ enrolled_patterns = [
 # =============================================================================
 structure_patterns = [
     # Sections
-    path('courses/<uuid:pk>/sections/', 
-         views.CourseViewSet.as_view({'get': 'sections'}), name='course-sections'),
+    path('courses/<uuid:pk>/sections/summary/', 
+     views.CourseViewSet.as_view({'get': 'sections'}), name='course-sections-summary'),
     path('courses/<uuid:course_pk>/sections/', 
          views.CourseSectionViewSet.as_view({'get': 'list', 'post': 'create'}), name='section-list'),
     path('courses/<uuid:course_pk>/sections/<uuid:pk>/', 
