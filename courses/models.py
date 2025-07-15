@@ -7,6 +7,7 @@ from django.utils.crypto import get_random_string
 from django.db.models import Q
 from core.models import BaseModel
 from authentication.models import User
+from enrollments.models import Enrollment
 # REMOVED: from enrollments.models import Enrollment
 
 class CourseCategory(BaseModel):
@@ -186,6 +187,43 @@ class Course(BaseModel):
     def total_lectures_count(self):
         """Count all lectures in all sections of this course"""
         return sum(section.lectures.count() for section in self.sections.all())
+    
+    def is_content_available(self, user, content_object):
+        """Check if content is available for a user based on release rules"""
+        if not hasattr(self, 'release_schedule'):
+            return True  # No schedule means all content is available
+        
+        if self.release_schedule.unlock_all:
+            return True
+            
+        try:
+            enrollment = self.enrollments.get(student=user)
+        except Enrollment.DoesNotExist:
+            return False
+            
+        # Check release rules
+        rules = self.release_schedule.rules.filter(
+            Q(section=content_object) |
+            Q(lecture=content_object) |
+            Q(quiz=content_object)
+        )
+        
+        if not rules.exists():
+            return True  # No specific rules for this content
+            
+        for rule in rules:
+            if rule.trigger == 'enrollment':
+                days_since_enrollment = (timezone.now() - enrollment.enrolled_at).days
+                if days_since_enrollment >= rule.offset_days:
+                    return True
+            elif rule.trigger == 'date' and rule.release_date:
+                if timezone.now() >= rule.release_date:
+                    return True
+            elif rule.trigger == 'completion':
+                # Check if prerequisite content is completed
+                pass
+                
+        return False
 
 class CourseSection(BaseModel):
     course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='sections')

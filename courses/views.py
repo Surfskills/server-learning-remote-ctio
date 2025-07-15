@@ -285,7 +285,7 @@ class CourseViewSet(BaseModelViewSet, CourseFilterMixin):
 
     @action(detail=True, methods=['get'])
     def sections(self, request, pk=None):
-        """Get sections for a specific course with optimized queries"""
+        """Get sections for a specific course with optimized queries and complete lecture data"""
         def _get_sections():
             course = self.get_object()
             
@@ -294,26 +294,331 @@ class CourseViewSet(BaseModelViewSet, CourseFilterMixin):
                 from django.http import Http404
                 raise Http404("Course not found")
             
+            # Enhanced prefetch to include all lecture data and related content
             sections = course.sections.prefetch_related(
-                Prefetch('lectures', queryset=Lecture.objects.order_by('order'))
+                Prefetch(
+                    'lectures',
+                    queryset=Lecture.objects.order_by('order').prefetch_related(
+                        # Include all lecture resources
+                        Prefetch('resources', queryset=LectureResource.objects.all()),
+                        # Include all Q&A items with user details
+                        Prefetch('qa_items', queryset=QaItem.objects.select_related('asked_by')),
+                        # Include all project tools
+                        Prefetch('project_tools', queryset=ProjectTool.objects.all()),
+                        # Include all quizzes with questions and tasks
+                        Prefetch('quizzes', queryset=Quiz.objects.prefetch_related(
+                            Prefetch('questions', queryset=QuizQuestion.objects.order_by('order')),
+                            Prefetch('tasks', queryset=QuizTask.objects.order_by('order'))
+                        ))
+                    )
+                ),
+                # Include section-level quizzes
+                Prefetch('quizzes', queryset=Quiz.objects.prefetch_related(
+                    Prefetch('questions', queryset=QuizQuestion.objects.order_by('order')),
+                    Prefetch('tasks', queryset=QuizTask.objects.order_by('order'))
+                ))
             ).order_by('order')
             
-            sections_data = [{
-                'id': section.id,
-                'title': section.title,
-                'order': section.order,
-                'lectures': [{
-                    'id': lecture.id,
-                    'title': lecture.title,
-                    'duration': lecture.duration,
-                    'preview_available': lecture.preview_available
-                } for lecture in section.lectures.all()]
-            } for section in sections]
+            sections_data = []
+            for section in sections:
+                lectures_data = []
+                
+                for lecture in section.lectures.all():
+                    # Build complete lecture data
+                    lecture_data = {
+                        'id': lecture.id,
+                        'title': lecture.title,
+                        'order': lecture.order,
+                        'duration': lecture.duration,
+                        'overview': lecture.overview,
+                        'video_url': lecture.video_url,
+                        'preview_available': lecture.preview_available,
+                        'created_at': lecture.created_at,
+                        'updated_at': lecture.updated_at,
+                        
+                        # Format duration for display
+                        'duration_formatted': self._format_duration(lecture.duration),
+                        
+                        # Include all lecture resources
+                        'resources': [{
+                            'id': resource.id,
+                            'title': resource.title,
+                            'description': resource.description,
+                            'resource_type': resource.resource_type,
+                            'kind': resource.kind,
+                            'url': resource.url,
+                            'file_url': resource.file_url,
+                            'external_url': resource.external_url,
+                            'provider': resource.provider,
+                            'duration_seconds': resource.duration_seconds,
+                            'is_downloadable': resource.is_downloadable,
+                            'file_size': resource.file_size,
+                            'mime_type': resource.mime_type,
+                            'effective_url': resource.effective_url,
+                            'created_at': resource.created_at,
+                            'updated_at': resource.updated_at
+                        } for resource in lecture.resources.all()],
+                        
+                        # Include all Q&A items
+                        'qa_items': [{
+                            'id': qa.id,
+                            'question': qa.question,
+                            'answer': qa.answer,
+                            'upvotes': qa.upvotes,
+                            'resolved': qa.resolved,
+                            'created_at': qa.created_at,
+                            'updated_at': qa.updated_at,
+                            'asked_by': {
+                                'id': qa.asked_by.id,
+                                'first_name': qa.asked_by.first_name,
+                                'last_name': qa.asked_by.last_name,
+                                'email': qa.asked_by.email if request.user.is_authenticated else None
+                            } if qa.asked_by else None
+                        } for qa in lecture.qa_items.all()],
+                        
+                        # Include all project tools
+                        'project_tools': [{
+                            'id': tool.id,
+                            'name': tool.name,
+                            'description': tool.description,
+                            'url': tool.url,
+                            'icon': tool.icon,
+                            'created_at': tool.created_at,
+                            'updated_at': tool.updated_at
+                        } for tool in lecture.project_tools.all()],
+                        
+                        # Include all quizzes with questions and tasks
+                        'quizzes': [{
+                            'id': quiz.id,
+                            'title': quiz.title,
+                            'description': quiz.description,
+                            'instructions': quiz.instructions,
+                            'points_possible': quiz.points_possible,
+                            'due_date': quiz.due_date,
+                            'is_published': quiz.is_published,
+                            'allow_multiple_attempts': quiz.allow_multiple_attempts,
+                            'max_attempts': quiz.max_attempts,
+                            'time_limit_minutes': quiz.time_limit_minutes,
+                            'created_at': quiz.created_at,
+                            'updated_at': quiz.updated_at,
+                            
+                            # Include quiz questions
+                            'questions': [{
+                                'id': question.id,
+                                'question': question.question,
+                                'question_type': question.question_type,
+                                'options': question.options,
+                                'correct_option_index': question.correct_option_index if request.user.is_authenticated else None,
+                                'correct_answer': question.correct_answer if request.user.is_authenticated else None,
+                                'points': question.points,
+                                'explanation': question.explanation,
+                                'order': question.order,
+                                'created_at': question.created_at,
+                                'updated_at': question.updated_at
+                            } for question in quiz.questions.all()],
+                            
+                            # Include quiz tasks
+                            'tasks': [{
+                                'id': task.id,
+                                'title': task.title,
+                                'description': task.description,
+                                'points': task.points,
+                                'accepts_files': task.accepts_files,
+                                'accepts_text': task.accepts_text,
+                                'accepted_file_types': task.accepted_file_types,
+                                'max_file_size': task.max_file_size,
+                                'max_files': task.max_files,
+                                'sample_answer': task.sample_answer,
+                                'required': task.required,
+                                'order': task.order,
+                                'created_at': task.created_at,
+                                'updated_at': task.updated_at
+                            } for task in quiz.tasks.all()]
+                        } for quiz in lecture.quizzes.all()],
+                        
+                        # Add content statistics
+                        'content_stats': {
+                            'resources_count': lecture.resources.count(),
+                            'qa_items_count': lecture.qa_items.count(),
+                            'project_tools_count': lecture.project_tools.count(),
+                            'quizzes_count': lecture.quizzes.count(),
+                            'total_quiz_questions': sum(quiz.questions.count() for quiz in lecture.quizzes.all()),
+                            'total_quiz_tasks': sum(quiz.tasks.count() for quiz in lecture.quizzes.all())
+                        },
+                        
+                        # Convenience flags
+                        'has_resources': lecture.resources.exists(),
+                        'has_qa_items': lecture.qa_items.exists(),
+                        'has_project_tools': lecture.project_tools.exists(),
+                        'has_quiz': lecture.quizzes.exists(),
+                        'has_video': bool(lecture.video_url),
+                        'is_completed': False  # This would need to be calculated based on user progress
+                    }
+                    
+                    lectures_data.append(lecture_data)
+                
+                # Build section data
+                section_data = {
+                    'id': section.id,
+                    'title': section.title,
+                    'description': section.description,
+                    'order': section.order,
+                    'created_at': section.created_at,
+                    'updated_at': section.updated_at,
+                    'lectures': lectures_data,
+                    
+                    # Include section-level quizzes
+                    'quizzes': [{
+                        'id': quiz.id,
+                        'title': quiz.title,
+                        'description': quiz.description,
+                        'instructions': quiz.instructions,
+                        'points_possible': quiz.points_possible,
+                        'due_date': quiz.due_date,
+                        'is_published': quiz.is_published,
+                        'allow_multiple_attempts': quiz.allow_multiple_attempts,
+                        'max_attempts': quiz.max_attempts,
+                        'time_limit_minutes': quiz.time_limit_minutes,
+                        'created_at': quiz.created_at,
+                        'updated_at': quiz.updated_at,
+                        
+                        # Include quiz questions
+                        'questions': [{
+                            'id': question.id,
+                            'question': question.question,
+                            'question_type': question.question_type,
+                            'options': question.options,
+                            'correct_option_index': question.correct_option_index if request.user.is_authenticated else None,
+                            'correct_answer': question.correct_answer if request.user.is_authenticated else None,
+                            'points': question.points,
+                            'explanation': question.explanation,
+                            'order': question.order,
+                            'created_at': question.created_at,
+                            'updated_at': question.updated_at
+                        } for question in quiz.questions.all()],
+                        
+                        # Include quiz tasks
+                        'tasks': [{
+                            'id': task.id,
+                            'title': task.title,
+                            'description': task.description,
+                            'points': task.points,
+                            'accepts_files': task.accepts_files,
+                            'accepts_text': task.accepts_text,
+                            'accepted_file_types': task.accepted_file_types,
+                            'max_file_size': task.max_file_size,
+                            'max_files': task.max_files,
+                            'sample_answer': task.sample_answer,
+                            'required': task.required,
+                            'order': task.order,
+                            'created_at': task.created_at,
+                            'updated_at': task.updated_at
+                        } for task in quiz.tasks.all()]
+                    } for quiz in section.quizzes.all()],
+                    
+                    # Add section-level statistics
+                    'section_stats': {
+                        'lectures_count': len(lectures_data),
+                        'total_resources': sum(lecture['content_stats']['resources_count'] for lecture in lectures_data),
+                        'total_qa_items': sum(lecture['content_stats']['qa_items_count'] for lecture in lectures_data),
+                        'total_project_tools': sum(lecture['content_stats']['project_tools_count'] for lecture in lectures_data),
+                        'total_lecture_quizzes': sum(lecture['content_stats']['quizzes_count'] for lecture in lectures_data),
+                        'section_quizzes_count': section.quizzes.count(),
+                        'total_duration': sum(self._parse_duration_to_minutes(lecture['duration']) for lecture in lectures_data)
+                    },
+                    
+                    # Convenience flags
+                    'has_lectures': len(lectures_data) > 0,
+                    'has_quizzes': section.quizzes.exists()
+                }
+                
+                sections_data.append(section_data)
             
-            return Response({'results': sections_data})
+            # Calculate course-level statistics
+            course_stats = {
+                'total_sections': len(sections_data),
+                'total_lectures': sum(section['section_stats']['lectures_count'] for section in sections_data),
+                'total_resources': sum(section['section_stats']['total_resources'] for section in sections_data),
+                'total_qa_items': sum(section['section_stats']['total_qa_items'] for section in sections_data),
+                'total_project_tools': sum(section['section_stats']['total_project_tools'] for section in sections_data),
+                'total_lecture_quizzes': sum(section['section_stats']['total_lecture_quizzes'] for section in sections_data),
+                'total_section_quizzes': sum(section['section_stats']['section_quizzes_count'] for section in sections_data),
+                'total_duration_minutes': sum(section['section_stats']['total_duration'] for section in sections_data)
+            }
+            
+            # Calculate total quizzes including course-level quizzes
+            course_level_quizzes = Quiz.objects.filter(course=course, section__isnull=True, lecture__isnull=True).count()
+            course_stats['total_course_quizzes'] = course_level_quizzes
+            course_stats['total_quizzes'] = (
+                course_stats['total_lecture_quizzes'] + 
+                course_stats['total_section_quizzes'] + 
+                course_stats['total_course_quizzes']
+            )
+            
+            # Format total duration
+            total_minutes = course_stats['total_duration_minutes']
+            hours = total_minutes // 60
+            minutes = total_minutes % 60
+            course_stats['total_duration_formatted'] = f"{hours}h {minutes}min" if hours > 0 else f"{minutes}min"
+            
+            return Response({
+                'results': sections_data,
+                'course_stats': course_stats,
+                'course_info': {
+                    'id': course.id,
+                    'title': course.title,
+                    'slug': course.slug,
+                    'description': course.description,
+                    'is_published': course.is_published,
+                    'is_active': course.is_active
+                }
+            })
         
         return execute_with_retry(_get_sections)
-
+    
+    def _format_duration(self, duration_str):
+        """Format duration string for display"""
+        if not duration_str:
+            return "0 min"
+        
+        try:
+            # Parse duration string (assuming format like "01:30:45" or "00:30:00")
+            parts = duration_str.split(':')
+            if len(parts) == 3:
+                hours, minutes, seconds = map(int, parts)
+                total_minutes = hours * 60 + minutes
+                if seconds >= 30:  # Round up if seconds >= 30
+                    total_minutes += 1
+                
+                if total_minutes >= 60:
+                    hours = total_minutes // 60
+                    minutes = total_minutes % 60
+                    return f"{hours}h {minutes}min" if minutes > 0 else f"{hours}h"
+                else:
+                    return f"{total_minutes} min"
+            else:
+                return duration_str
+        except (ValueError, AttributeError):
+            return duration_str or "0 min"
+    
+    def _parse_duration_to_minutes(self, duration_str):
+        """Parse duration string to total minutes"""
+        if not duration_str:
+            return 0
+        
+        try:
+            parts = duration_str.split(':')
+            if len(parts) == 3:
+                hours, minutes, seconds = map(int, parts)
+                total_minutes = hours * 60 + minutes
+                if seconds >= 30:  # Round up if seconds >= 30
+                    total_minutes += 1
+                return total_minutes
+            else:
+                return 0
+        except (ValueError, AttributeError):
+            return 0
+        
 class AdminCourseViewSet(BaseModelViewSet, CourseFilterMixin):
     """Admin-specific course management with additional fields and controls"""
     queryset = Course.objects.all()
@@ -491,9 +796,9 @@ class CourseDetailView(generics.RetrieveAPIView):
 
 class CourseContentView(generics.RetrieveAPIView):
     """
-    Alternative endpoint that returns only course content structure
-    (sections and lectures) without all the detailed nested data.
-    Useful for course navigation/sidebar components.
+    Enhanced endpoint that returns complete course content structure
+    including all lecture resources, Q&A items, project tools, and quizzes.
+    Useful for course navigation/content management components.
     """
     serializer_class = CourseDetailSerializer
     permission_classes = []
@@ -501,7 +806,7 @@ class CourseContentView(generics.RetrieveAPIView):
     lookup_url_kwarg = 'slug'
 
     def get_queryset(self):
-        """Lighter queryset for content structure only"""
+        """Enhanced queryset with complete lecture content"""
         queryset = Course.objects.select_related(
             'instructor',
             'category'
@@ -511,8 +816,18 @@ class CourseContentView(generics.RetrieveAPIView):
                 queryset=CourseSection.objects.order_by('order').prefetch_related(
                     Prefetch(
                         'lectures',
-                        queryset=Lecture.objects.order_by('order').only(
-                            'id', 'title', 'duration', 'order', 'preview_available', 'section'
+                        queryset=Lecture.objects.order_by('order').prefetch_related(
+                            # Include all lecture resources
+                            Prefetch('resources', queryset=LectureResource.objects.all()),
+                            # Include all Q&A items with user details
+                            Prefetch('qa_items', queryset=QaItem.objects.select_related('asked_by')),
+                            # Include all project tools
+                            Prefetch('project_tools', queryset=ProjectTool.objects.all()),
+                            # Include all quizzes with questions and tasks
+                            Prefetch('quizzes', queryset=Quiz.objects.prefetch_related(
+                                Prefetch('questions', queryset=QuizQuestion.objects.order_by('order')),
+                                Prefetch('tasks', queryset=QuizTask.objects.order_by('order'))
+                            ))
                         )
                     )
                 )
@@ -528,14 +843,25 @@ class CourseContentView(generics.RetrieveAPIView):
         return queryset
 
     def retrieve(self, request, *args, **kwargs):
-        """Return only the course structure"""
+        """Return complete course structure with all content"""
         instance = self.get_object()
         
-        # Create a simplified response
+        # Create a comprehensive response
         data = {
             'id': instance.id,
             'title': instance.title,
             'slug': instance.slug,
+            'description': instance.description,
+            'instructor': {
+                'id': instance.instructor.id,
+                'first_name': instance.instructor.first_name,
+                'last_name': instance.instructor.last_name,
+                'email': instance.instructor.email if request.user.is_authenticated else None
+            },
+            'category': {
+                'id': instance.category.id,
+                'name': instance.category.name
+            } if instance.category else None,
             'sections': []
         }
         
@@ -551,14 +877,167 @@ class CourseContentView(generics.RetrieveAPIView):
                 lecture_data = {
                     'id': lecture.id,
                     'title': lecture.title,
+                    'overview': lecture.overview,
+                    'video_url': lecture.video_url,
                     'duration': lecture.duration,
                     'order': lecture.order,
                     'preview_available': lecture.preview_available,
-                    'is_completed': False  # Calculate based on user progress if needed
+                    'is_completed': False,  # Calculate based on user progress if needed
+                    
+                    # Include all lecture resources
+                    'resources': [{
+                        'id': resource.id,
+                        'title': resource.title,
+                        'resource_type': resource.resource_type,
+                        'file_url': resource.file_url,
+                        'external_url': resource.external_url,
+                        'description': resource.description,
+                        'is_downloadable': resource.is_downloadable,
+                        'file_size': resource.file_size,
+                        'created_at': resource.created_at
+                    } for resource in lecture.resources.all()],
+                    
+                    # Include all Q&A items
+                    'qa_items': [{
+                        'id': qa.id,
+                        'question': qa.question,
+                        'answer': qa.answer,
+                        'upvotes': qa.upvotes,
+                        'resolved': qa.resolved,
+                        'created_at': qa.created_at,
+                        'asked_by': {
+                            'id': qa.asked_by.id,
+                            'first_name': qa.asked_by.first_name,
+                            'last_name': qa.asked_by.last_name
+                        } if qa.asked_by else None
+                    } for qa in lecture.qa_items.all()],
+                    
+                    # Include all project tools
+                    'project_tools': [{
+                        'id': tool.id,
+                        'name': tool.name,
+                        'description': tool.description,
+                        'tool_type': tool.tool_type,
+                        'url': tool.url,
+                        'instructions': tool.instructions,
+                        'is_required': tool.is_required,
+                        'created_at': tool.created_at
+                    } for tool in lecture.project_tools.all()],
+                    
+                    # Include all quizzes with questions and tasks
+                    'quizzes': [{
+                        'id': quiz.id,
+                        'title': quiz.title,
+                        'description': quiz.description,
+                        'quiz_type': quiz.quiz_type,
+                        'time_limit': quiz.time_limit,
+                        'max_attempts': quiz.max_attempts,
+                        'passing_score': quiz.passing_score,
+                        'is_published': quiz.is_published,
+                        'created_at': quiz.created_at,
+                        
+                        # Include quiz questions
+                        'questions': [{
+                            'id': question.id,
+                            'question_text': question.question_text,
+                            'question_type': question.question_type,
+                            'options': question.options,
+                            'correct_answer': question.correct_answer if request.user.is_authenticated else None,
+                            'explanation': question.explanation,
+                            'points': question.points,
+                            'order': question.order
+                        } for question in quiz.questions.all()],
+                        
+                        # Include quiz tasks
+                        'tasks': [{
+                            'id': task.id,
+                            'title': task.title,
+                            'description': task.description,
+                            'task_type': task.task_type,
+                            'instructions': task.instructions,
+                            'expected_output': task.expected_output,
+                            'starter_code': task.starter_code,
+                            'test_cases': task.test_cases,
+                            'points': task.points,
+                            'order': task.order
+                        } for task in quiz.tasks.all()]
+                    } for quiz in lecture.quizzes.all()],
+                    
+                    # Add content statistics
+                    'content_stats': {
+                        'resources_count': lecture.resources.count(),
+                        'qa_items_count': lecture.qa_items.count(),
+                        'project_tools_count': lecture.project_tools.count(),
+                        'quizzes_count': lecture.quizzes.count(),
+                        'total_quiz_questions': sum(quiz.questions.count() for quiz in lecture.quizzes.all()),
+                        'total_quiz_tasks': sum(quiz.tasks.count() for quiz in lecture.quizzes.all())
+                    }
                 }
                 section_data['lectures'].append(lecture_data)
             
+            # Add section-level statistics
+            section_data['section_stats'] = {
+                'lectures_count': len(section_data['lectures']),
+                'total_resources': sum(lecture['content_stats']['resources_count'] for lecture in section_data['lectures']),
+                'total_qa_items': sum(lecture['content_stats']['qa_items_count'] for lecture in section_data['lectures']),
+                'total_project_tools': sum(lecture['content_stats']['project_tools_count'] for lecture in section_data['lectures']),
+                'total_quizzes': sum(lecture['content_stats']['quizzes_count'] for lecture in section_data['lectures']),
+                'total_duration': sum(lecture['duration'] or 0 for lecture in section_data['lectures'])
+            }
+            
             data['sections'].append(section_data)
+        
+        # Add course-level statistics
+        data['course_stats'] = {
+            'total_sections': len(data['sections']),
+            'total_lectures': sum(section['section_stats']['lectures_count'] for section in data['sections']),
+            'total_resources': sum(section['section_stats']['total_resources'] for section in data['sections']),
+            'total_qa_items': sum(section['section_stats']['total_qa_items'] for section in data['sections']),
+            'total_project_tools': sum(section['section_stats']['total_project_tools'] for section in data['sections']),
+            'total_quizzes': sum(section['section_stats']['total_quizzes'] for section in data['sections']),
+            'total_duration': sum(section['section_stats']['total_duration'] for section in data['sections'])
+        }
+        
+        # Format total duration
+        total_minutes = data['course_stats']['total_duration']
+        hours = total_minutes // 60
+        minutes = total_minutes % 60
+        data['course_stats']['total_duration_formatted'] = f"{hours}h {minutes}min" if hours > 0 else f"{minutes}min"
+        
+        # Add user-specific data if authenticated
+        if request.user.is_authenticated:
+            try:
+                from enrollments.models import Enrollment
+                enrollment = Enrollment.objects.get(
+                    student=request.user,
+                    course=instance
+                )
+                
+                # Add enrollment and progress data
+                data['user_data'] = {
+                    'is_enrolled': True,
+                    'enrollment_date': enrollment.enrollment_date,
+                    'progress_percent': enrollment.progress.progress_percent if hasattr(enrollment, 'progress') else 0,
+                    'completed_lectures': enrollment.progress.completed_lectures.count() if hasattr(enrollment, 'progress') else 0,
+                    'time_spent_minutes': enrollment.progress.time_spent_minutes if hasattr(enrollment, 'progress') else 0,
+                    'last_accessed': enrollment.progress.last_accessed if hasattr(enrollment, 'progress') else None
+                }
+                
+                # Mark completed lectures
+                if hasattr(enrollment, 'progress'):
+                    completed_lecture_ids = set(enrollment.progress.completed_lectures.values_list('id', flat=True))
+                    for section in data['sections']:
+                        for lecture in section['lectures']:
+                            lecture['is_completed'] = lecture['id'] in completed_lecture_ids
+                            
+            except Enrollment.DoesNotExist:
+                data['user_data'] = {
+                    'is_enrolled': False
+                }
+        else:
+            data['user_data'] = {
+                'is_enrolled': False
+            }
         
         return Response(data)
 

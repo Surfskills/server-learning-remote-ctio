@@ -1,39 +1,29 @@
+# enrollments/views.py
+from datetime import datetime, timedelta
+
+from django.db.models import Q, Count, Sum
+from django.shortcuts import get_object_or_404
+from django.http import Http404
+from django.utils import timezone
 from rest_framework import viewsets, generics, status
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
-from rest_framework.decorators import action
-from django.db.models import Q
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from django.db.models import Count, Sum
-from django.utils import timezone
-from datetime import timedelta
+from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.response import Response 
 from enrollments.models import Enrollment, CourseProgress
 from courses.models import Course, Lecture
 from users.models import UserActivity
 from courses.serializers import CourseSerializer
 from users.serializers import UserActivitySerializer
-from .models import Enrollment, CourseProgress
 from .serializers import (
     EnrollmentSerializer, 
     CourseProgressSerializer,
     EnrollmentCreateSerializer
 )
-from django.shortcuts import get_object_or_404
-from django.http import Http404
-import logging
-logger = logging.getLogger(__name__)
-from rest_framework.permissions import IsAuthenticated, IsAdminUser
-from rest_framework.decorators import action
-from rest_framework import status
-from rest_framework.response import Response
-from django.utils import timezone
-from django.db.models import Count, Q
-from enrollments.models import Enrollment, CourseProgress
 from core.views import BaseModelViewSet
 from core.utils import success_response, error_response
 from core.permissions import IsStudent, IsEnrolledStudent
+
 
 class EnrollmentViewSet(BaseModelViewSet):
     serializer_class = EnrollmentSerializer
@@ -46,13 +36,60 @@ class EnrollmentViewSet(BaseModelViewSet):
         if not self.request.user.is_staff:
             queryset = queryset.filter(student=self.request.user)
 
+        # Filter by course_id if provided
+        course_id = self.request.query_params.get('course_id')
+        if course_id:
+            queryset = queryset.filter(course_id=course_id)
+
+        # Filter by course_slug if provided
+        course_slug = self.request.query_params.get('course_slug')
+        if course_slug:
+            queryset = queryset.filter(course__slug=course_slug)
+
         # Recent filter for query param approach
         if self.request.query_params.get('recent', '').lower() in ('true', '1', 'yes'):
-            from datetime import datetime, timedelta
             thirty_days_ago = datetime.now() - timedelta(days=30)
             queryset = queryset.filter(enrolled_at__gte=thirty_days_ago)
 
         return queryset.order_by('-enrolled_at')
+
+    @action(detail=False, methods=['get'])
+    def by_course(self, request):
+        """Get enrollment for a specific course"""
+        course_id = request.query_params.get('course_id')
+        course_slug = request.query_params.get('course_slug')
+        
+        if not course_id and not course_slug:
+            return error_response(
+                "Either course_id or course_slug is required",
+                status_code=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            queryset = self.get_queryset()
+            
+            if course_id:
+                enrollment = queryset.filter(course_id=course_id).first()
+            else:
+                enrollment = queryset.filter(course__slug=course_slug).first()
+            
+            if not enrollment:
+                return error_response(
+                    "No enrollment found for this course",
+                    status_code=status.HTTP_404_NOT_FOUND
+                )
+            
+            serializer = self.get_serializer(enrollment)
+            return success_response(
+                data=serializer.data,
+                message="Enrollment retrieved successfully"
+            )
+            
+        except Exception as e:
+            return error_response(
+                "Failed to retrieve enrollment",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
     
     @action(detail=False, methods=['get'])
     def recent(self, request):
@@ -60,7 +97,6 @@ class EnrollmentViewSet(BaseModelViewSet):
         queryset = self.filter_queryset(self.get_queryset())
         
         # More optimized than the query param approach
-        from datetime import datetime, timedelta
         thirty_days_ago = datetime.now() - timedelta(days=30)
         recent_enrollments = queryset.filter(enrolled_at__gte=thirty_days_ago)
         
@@ -123,11 +159,11 @@ class EnrollmentViewSet(BaseModelViewSet):
         
         return success_response("Course marked as incomplete")
 
-# enrollments/views.py
+
 class CourseProgressViewSet(BaseModelViewSet):
     serializer_class = CourseProgressSerializer
     permission_classes = [IsAuthenticated, IsEnrolledStudent]
-    lookup_field = 'enrollment_id'  # Make it clear we're looking up by enrollment
+    lookup_field = 'enrollment_id'
 
     def get_queryset(self):
         return CourseProgress.objects.filter(enrollment__student=self.request.user)
@@ -149,20 +185,22 @@ class CourseProgressViewSet(BaseModelViewSet):
                 enrollment=enrollment
             )
             
-            if created:
-                logger.info(f"Created new progress for enrollment {enrollment_id}")
-            
             return progress
             
         except Exception as e:
-            logger.error(f"Error getting progress for enrollment {enrollment_id}: {e}")
             raise Http404("Progress not found")
+
     @action(detail=True, methods=['post'])
     def complete_lecture(self, request, enrollment_id=None):
-        """Mark lecture as completed"""
+        """Mark lecture as completed with enhanced validation"""
         try:
+            # Get progress object and validate enrollment belongs to user
             progress = self.get_object()
             lecture_id = request.data.get('lecture_id')
+            course_id = request.data.get('course_id')
+            section_id = request.data.get('section_id')
+            lecture_title = request.data.get('lecture_title')
+            section_title = request.data.get('section_title')
             
             if not lecture_id:
                 return error_response(
@@ -170,52 +208,128 @@ class CourseProgressViewSet(BaseModelViewSet):
                     status.HTTP_400_BAD_REQUEST
                 )
 
-            # Get lecture and verify it belongs to the enrolled course
+            # Get enrollment from progress
+            enrollment = progress.enrollment
+            
+            # Validate enrollment belongs to the user
+            if enrollment.student != request.user:
+                return error_response(
+                    {'error': 'You are not authorized to complete lectures for this enrollment'},
+                    status.HTTP_403_FORBIDDEN
+                )
+
+            # Validate course_id matches enrollment if provided
+            if course_id and str(enrollment.course_id) != str(course_id):
+                return error_response(
+                    {'course_id': f'Course ID mismatch. Expected {enrollment.course_id}, got {course_id}'},
+                    status.HTTP_400_BAD_REQUEST
+                )
+
+            # Get lecture with enhanced validation
             try:
                 lecture = Lecture.objects.select_related('section__course').get(
                     id=lecture_id
                 )
                 
-                # Verify lecture belongs to the enrolled course
-                if lecture.section.course_id != progress.enrollment.course_id:
+                # Validate lecture belongs to the enrolled course
+                if lecture.section.course_id != enrollment.course_id:
                     return error_response(
-                        {'lecture_id': f'Lecture does not belong to the enrolled course'},
+                        {'lecture_id': f'Lecture does not belong to the enrolled course. Expected course {enrollment.course_id}, but lecture belongs to course {lecture.section.course_id}'},
                         status.HTTP_400_BAD_REQUEST
                     )
+                
+                # Validate section_id matches if provided
+                if section_id and str(lecture.section_id) != str(section_id):
+                    return error_response(
+                        {'section_id': f'Section ID mismatch. Lecture belongs to section {lecture.section_id}, but {section_id} was provided'},
+                        status.HTTP_400_BAD_REQUEST
+                    )
+
+                # Additional validation - check if lecture is part of course structure
+                course = lecture.section.course
+                if not course.sections.filter(id=lecture.section_id).exists():
+                    return error_response(
+                        {'lecture_id': 'Lecture section not found in course structure'},
+                        status.HTTP_400_BAD_REQUEST
+                    )
+
+                # Validate course is active/published
+                if not course.is_published:
+                    return error_response(
+                        {'course_id': 'Cannot complete lectures in unpublished courses'},
+                        status.HTTP_400_BAD_REQUEST
+                    )
+                    
+                # Check if lecture is already completed
+                if progress.completed_lectures.filter(id=lecture_id).exists():
+                    return Response({
+                        'status': 'success',
+                        'message': 'Lecture already completed',
+                        'data': {
+                            'progress_percentage': progress.get_progress_percentage(),
+                            'completed_lectures': list(progress.completed_lectures.values_list('id', flat=True)),
+                            'lecture_completed': True,
+                            'is_course_completed': progress.is_course_completed()
+                        }
+                    }, status=status.HTTP_200_OK)
+                
+                # Mark lecture as complete
+                was_completed = progress.mark_lecture_complete(lecture)
+                if not was_completed:
+                    return Response({
+                        'status': 'success',
+                        'message': 'Lecture already completed',
+                        'data': {
+                            'progress_percentage': progress.get_progress_percentage(),
+                            'completed_lectures': list(progress.completed_lectures.values_list('id', flat=True)),
+                            'is_course_completed': progress.is_course_completed()
+                        }
+                    }, status=status.HTTP_200_OK)
+                
+                # Prepare response data
+                response_data = {
+                    'status': 'success',
+                    'message': 'Lecture marked as completed',
+                    'data': {
+                        'progress_percentage': progress.get_progress_percentage(),
+                        'completed_lectures': list(progress.completed_lectures.values_list('id', flat=True)),
+                        'lecture_completed': True,
+                        'is_course_completed': progress.is_course_completed(),
+                        'last_accessed_lecture_id': lecture.id,
+                        'enrollment_id': enrollment.id,
+                        'course_id': enrollment.course_id
+                    },
+                    'lecture': {
+                        'id': lecture.id,
+                        'title': lecture_title or lecture.title,
+                        'section_id': lecture.section_id,
+                        'section_title': section_title or lecture.section.title,
+                        'course_id': lecture.section.course_id,
+                        'order': lecture.order
+                    }
+                }
+                
+                # Check if course is now completed
+                if progress.is_course_completed() and not enrollment.completed:
+                    enrollment.completed = True
+                    enrollment.completed_at = timezone.now()
+                    enrollment.save()
+                    
+                    if hasattr(enrollment, '_award_completion_points'):
+                        enrollment._award_completion_points()
+                    
+                    response_data['message'] = 'Course completed! Congratulations!'
+                    response_data['data']['course_completed_at'] = enrollment.completed_at.isoformat()
+                
+                return Response(response_data, status=status.HTTP_200_OK)
                 
             except Lecture.DoesNotExist:
                 return error_response(
                     {'lecture_id': 'Lecture not found'},
                     status.HTTP_404_NOT_FOUND
                 )
-            
-            # Mark lecture as complete
-            was_completed = progress.mark_lecture_complete(lecture)
-            if not was_completed:
-                return success_response({
-                    'message': 'Lecture already completed',
-                    'progress': progress.get_progress_stats()
-                })
-            
-            progress_stats = progress.get_progress_stats()
-            response_data = {
-                'progress': progress_stats,
-                'lecture': {
-                    'id': lecture.id,
-                    'title': lecture.title,
-                    'section_id': lecture.section_id,
-                    'course_id': lecture.section.course_id
-                },
-                'message': 'Lecture marked as completed'
-            }
-            
-            if progress_stats['is_completed']:
-                response_data['message'] = 'Course completed! Congratulations!'
-            
-            return success_response(response_data)
-            
+                
         except Exception as e:
-            logger.exception("Error completing lecture")
             return error_response(
                 {'error': f'Internal server error: {str(e)}'},
                 status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -224,13 +338,13 @@ class CourseProgressViewSet(BaseModelViewSet):
     @action(detail=True, methods=['post'])
     def uncomplete_lecture(self, request, enrollment_id=None):
         """Remove a lecture from completed lectures"""
-        progress = self.get_object()
-        lecture_id = request.data.get('lecture_id')
-        
-        if not lecture_id:
-            return error_response('lecture_id is required', status_code=status.HTTP_400_BAD_REQUEST)
-        
         try:
+            progress = self.get_object()
+            lecture_id = request.data.get('lecture_id')
+            
+            if not lecture_id:
+                return error_response('lecture_id is required', status_code=status.HTTP_400_BAD_REQUEST)
+            
             lecture = Lecture.objects.get(pk=lecture_id)
             
             # Use the new method
@@ -250,38 +364,52 @@ class CourseProgressViewSet(BaseModelViewSet):
             }
             
             return Response(response_data, status=status.HTTP_200_OK)
+            
         except Lecture.DoesNotExist:
             return error_response('Lecture not found', status_code=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return error_response(
+                f'Internal server error: {str(e)}',
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     @action(detail=True, methods=['get'])
     def progress_detail(self, request, enrollment_id=None):
         """Get detailed progress information"""
-        progress = self.get_object()
-        progress_stats = progress.get_progress_stats()
-        
-        # Get completed lectures with details
-        completed_lectures = progress.completed_lectures.select_related('section').all()
-        
-        response_data = {
-            'enrollment': EnrollmentSerializer(progress.enrollment).data,
-            'progress_stats': progress_stats,
-            'completed_lectures': [
-                {
-                    'id': lecture.id,
-                    'title': lecture.title,
-                    'section': lecture.section.title,
-                    'order': lecture.order
-                }
-                for lecture in completed_lectures
-            ],
-            'last_accessed_lecture': {
-                'id': progress.last_accessed_lecture.id,
-                'title': progress.last_accessed_lecture.title,
-                'section': progress.last_accessed_lecture.section.title
-            } if progress.last_accessed_lecture else None
-        }
-        
-        return Response(response_data, status=status.HTTP_200_OK)
+        try:
+            progress = self.get_object()
+            progress_stats = progress.get_progress_stats()
+            
+            # Get completed lectures with details
+            completed_lectures = progress.completed_lectures.select_related('section').all()
+            
+            response_data = {
+                'enrollment': EnrollmentSerializer(progress.enrollment).data,
+                'progress_stats': progress_stats,
+                'completed_lectures': [
+                    {
+                        'id': lecture.id,
+                        'title': lecture.title,
+                        'section': lecture.section.title,
+                        'order': lecture.order
+                    }
+                    for lecture in completed_lectures
+                ],
+                'last_accessed_lecture': {
+                    'id': progress.last_accessed_lecture.id,
+                    'title': progress.last_accessed_lecture.title,
+                    'section': progress.last_accessed_lecture.section.title
+                } if progress.last_accessed_lecture else None
+            }
+            
+            return Response(response_data, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            return error_response(
+                f'Internal server error: {str(e)}',
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
 
 class AdminEnrollmentViewSet(BaseModelViewSet):
     """Admin-only viewset to see all enrollments"""
@@ -319,129 +447,304 @@ class AdminEnrollmentViewSet(BaseModelViewSet):
     @action(detail=False, methods=['get'])
     def completion_stats(self, request):
         """Get course completion statistics"""
-        queryset = self.get_queryset()
-        
-        total_enrollments = queryset.count()
-        completed_enrollments = queryset.filter(completed=True).count()
-        completion_rate = (completed_enrollments / total_enrollments * 100) if total_enrollments > 0 else 0
-        
-        # Get completion stats by course
-        course_stats = queryset.values('course__title').annotate(
-            total_enrollments=Count('id'),
-            completed_enrollments=Count('id', filter=Q(completed=True))
-        ).order_by('-total_enrollments')
-        
-        for stat in course_stats:
-            total = stat['total_enrollments']
-            completed = stat['completed_enrollments']
-            stat['completion_rate'] = (completed / total * 100) if total > 0 else 0
-        
-        return Response({
-            'overall_stats': {
-                'total_enrollments': total_enrollments,
-                'completed_enrollments': completed_enrollments,
-                'completion_rate': round(completion_rate, 2)
-            },
-            'course_stats': course_stats
-        })
+        try:
+            queryset = self.get_queryset()
+            
+            total_enrollments = queryset.count()
+            completed_enrollments = queryset.filter(completed=True).count()
+            completion_rate = (completed_enrollments / total_enrollments * 100) if total_enrollments > 0 else 0
+            
+            # Get completion stats by course
+            course_stats = queryset.values('course__title').annotate(
+                total_enrollments=Count('id'),
+                completed_enrollments=Count('id', filter=Q(completed=True))
+            ).order_by('-total_enrollments')
+            
+            for stat in course_stats:
+                total = stat['total_enrollments']
+                completed = stat['completed_enrollments']
+                stat['completion_rate'] = (completed / total * 100) if total > 0 else 0
+            
+            return Response({
+                'overall_stats': {
+                    'total_enrollments': total_enrollments,
+                    'completed_enrollments': completed_enrollments,
+                    'completion_rate': round(completion_rate, 2)
+                },
+                'course_stats': course_stats
+            })
+            
+        except Exception as e:
+            return error_response(
+                f'Internal server error: {str(e)}',
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
+
+
+def get_user_badges(user, completed_courses_count):
+    """Enhanced badge system with exciting achievements using React icons"""
+    badges = []
+    
+    # Course completion badges with engaging descriptions
+    if completed_courses_count >= 1:
+        badges.append({
+            'id': 'first_course',
+            'name': '🎯 First Victory',
+            'description': 'Conquered your first course! The journey begins.',
+            'icon': 'Target',
+            'iconColor': '#10B981',  # emerald-500
+            'earnedDate': timezone.now().isoformat(),
+            'category': 'milestone',
+            'rarity': 'common',
+            'points': 100
+        })
+    
+    if completed_courses_count >= 2:
+        badges.append({
+            'id': 'double_achiever',
+            'name': '🔥 Double Threat',
+            'description': 'Two courses down! You\'re building momentum.',
+            'icon': 'Flame',
+            'iconColor': '#EF4444',  # red-500
+            'earnedDate': timezone.now().isoformat(),
+            'category': 'achievement',
+            'rarity': 'uncommon',
+            'points': 250
+        })
+    
+    if completed_courses_count >= 3:
+        badges.append({
+            'id': 'triple_master',
+            'name': '⚡ Triple Crown',
+            'description': 'Three courses mastered! You\'re unstoppable.',
+            'icon': 'Zap',
+            'iconColor': '#F59E0B',  # amber-500
+            'earnedDate': timezone.now().isoformat(),
+            'category': 'achievement',
+            'rarity': 'rare',
+            'points': 500
+        })
+    
+    if completed_courses_count >= 4:
+        badges.append({
+            'id': 'quad_legend',
+            'name': '👑 Quad Legend',
+            'description': 'Four courses conquered! You\'re a true learning champion.',
+            'icon': 'Crown',
+            'iconColor': '#8B5CF6',  # violet-500
+            'earnedDate': timezone.now().isoformat(),
+            'category': 'achievement',
+            'rarity': 'epic',
+            'points': 1000
+        })
+    
+    if completed_courses_count >= 5:
+        badges.append({
+            'id': 'learning_enthusiast',
+            'name': '🌟 Learning Enthusiast',
+            'description': 'Five courses completed! Your dedication is inspiring.',
+            'icon': 'Star',
+            'iconColor': '#F59E0B',  # amber-500
+            'earnedDate': timezone.now().isoformat(),
+            'category': 'achievement',
+            'rarity': 'legendary',
+            'points': 2000
+        })
+    
+    if completed_courses_count >= 10:
+        badges.append({
+            'id': 'knowledge_seeker',
+            'name': '🚀 Knowledge Seeker',
+            'description': 'Ten courses mastered! You\'re in the elite league.',
+            'icon': 'Rocket',
+            'iconColor': '#3B82F6',  # blue-500
+            'earnedDate': timezone.now().isoformat(),
+            'category': 'achievement',
+            'rarity': 'legendary',
+            'points': 5000
+        })
+    
+    # Special achievement badges
+    if completed_courses_count >= 3:
+        badges.append({
+            'id': 'consistency_king',
+            'name': '💎 Consistency Champion',
+            'description': 'Proven your commitment to continuous learning!',
+            'icon': 'Gem',
+            'iconColor': '#06B6D4',  # cyan-500
+            'earnedDate': timezone.now().isoformat(),
+            'category': 'special',
+            'rarity': 'rare',
+            'points': 750
+        })
+    
+    return badges
+
+def award_course_completion_badge(user, completed_courses_count):
+    """Award special completion badges with celebrations"""
+    celebration_messages = {
+        1: "🎉 Congratulations! You've completed your first course!",
+        2: "🔥 Amazing! Two courses down - you're on fire!",
+        3: "⚡ Incredible! Three courses mastered - you're unstoppable!",
+        4: "👑 Legendary! Four courses conquered - you're a true champion!",
+        5: "🌟 Phenomenal! Five courses completed - you're an inspiration!"
+    }
+    
+    special_rewards = {
+        2: {"points": 250, "title": "Double Achiever"},
+        3: {"points": 500, "title": "Triple Master", "unlock": "Advanced Learning Path"},
+        4: {"points": 1000, "title": "Quad Legend", "unlock": "Premium Course Access"},
+        5: {"points": 2000, "title": "Learning Enthusiast", "unlock": "Mentor Status"}
+    }
+    
+    message = celebration_messages.get(completed_courses_count, "🎯 Another course completed!")
+    reward = special_rewards.get(completed_courses_count, {})
+    
+    return {
+        'celebration_message': message,
+        'bonus_points': reward.get('points', 0),
+        'new_title': reward.get('title'),
+        'special_unlock': reward.get('unlock'),
+        'show_celebration': completed_courses_count in [2, 3, 4, 5]
+    }
+
+def get_badge_icon_config():
+    """Return icon configuration for frontend mapping"""
+    return {
+        'first_course': {'icon': 'Target', 'color': '#10B981'},
+        'double_achiever': {'icon': 'Flame', 'color': '#EF4444'},
+        'triple_master': {'icon': 'Zap', 'color': '#F59E0B'},
+        'quad_legend': {'icon': 'Crown', 'color': '#8B5CF6'},
+        'learning_enthusiast': {'icon': 'Star', 'color': '#F59E0B'},
+        'knowledge_seeker': {'icon': 'Rocket', 'color': '#3B82F6'},
+        'consistency_king': {'icon': 'Gem', 'color': '#06B6D4'}
+    }
+
+def get_available_icons():
+    """Return list of available Lucide React icons used in badges"""
+    return [
+        'Target',    # 🎯 First course
+        'Flame',     # 🔥 Double achiever
+        'Zap',       # ⚡ Triple master
+        'Crown',     # 👑 Quad legend
+        'Star',      # 🌟 Learning enthusiast
+        'Rocket',    # 🚀 Knowledge seeker
+        'Gem',       # 💎 Consistency champion
+        'Trophy',    # Additional option
+        'Award',     # Additional option
+        'Medal',     # Additional option
+        'Shield',    # Additional option
+        'Lightbulb', # Additional option
+        'BookOpen',  # Additional option
+        'GraduationCap' # Additional option
+    ]
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def student_dashboard(request):
-    # Get enrolled courses with progress - use left join to include enrollments without progress
-    enrollments = Enrollment.objects.filter(student=request.user).select_related(
-        'course'
-    ).prefetch_related(
-        'course__sections__lectures',
-        'progress'
-    )
-    
-    enrolled_courses = []
-    for enrollment in enrollments:
-        # Handle missing progress gracefully
-        try:
-            progress = enrollment.progress
-        except CourseProgress.DoesNotExist:
-            # Create progress if it doesn't exist
-            progress = CourseProgress.objects.create(enrollment=enrollment)
+    """Student dashboard with enrollment and progress data"""
+    try:
+        # Get enrolled courses with progress
+        enrollments = Enrollment.objects.filter(student=request.user).select_related(
+            'course'
+        ).prefetch_related(
+            'course__sections__lectures',
+            'progress'
+        )
         
-        course = enrollment.course
+        enrolled_courses = []
+        for enrollment in enrollments:
+            try:
+                progress = enrollment.progress
+            except CourseProgress.DoesNotExist:
+                progress = CourseProgress.objects.create(enrollment=enrollment)
+            
+            course = enrollment.course
+            progress_stats = progress.get_progress_stats()
+            
+            enrolled_courses.append({
+                'course': CourseSerializer(course).data,
+                'progress': CourseProgressSerializer(progress).data,
+                'enrollment': EnrollmentSerializer(enrollment).data,
+                'progress_stats': progress_stats,
+                'is_completed': enrollment.completed,
+                'completed_at': enrollment.completed_at.isoformat() if enrollment.completed_at else None
+            })
         
-        # Get progress stats using the new method
-        progress_stats = progress.get_progress_stats()
+        # Get learning stats
+        total_courses = enrollments.count()
+        completed_courses = enrollments.filter(completed=True).count()
+        in_progress_courses = enrollments.filter(completed=False).count()
         
-        enrolled_courses.append({
-            'course': CourseSerializer(course).data,
-            'progress': CourseProgressSerializer(progress).data,
-            'enrollment': EnrollmentSerializer(enrollment).data,
-            'progress_stats': progress_stats,  # Add detailed stats
-            'is_completed': enrollment.completed,
-            'completed_at': enrollment.completed_at.isoformat() if enrollment.completed_at else None
-        })
-    
-    # Get learning stats
-    total_courses = enrollments.count()
-    completed_courses = enrollments.filter(completed=True).count()
-    in_progress_courses = enrollments.filter(completed=False).count()
-    
-    # Calculate total learning hours (sum of all course durations)
-    total_hours = enrollments.aggregate(
-        total=Sum('course__duration')
-    )['total'] or 0
-    total_hours = round(total_hours / 60)  # Convert minutes to hours
-    
-    # Get streak (simplified - count consecutive days with activity)
-    today = timezone.now().date()
-    streak_days = 0
-    current_date = today
-    while UserActivity.objects.filter(
-        user=request.user,
-        created_at__date=current_date
-    ).exists():
-        streak_days += 1
-        current_date -= timedelta(days=1)
-    
-    # Get badges/achievements (enhanced)
-    badges = []
-    if completed_courses > 0:
-        badges.append({
-            'id': '1',
-            'name': 'First Course Completed',
-            'description': 'Completed your first course',
-            'imageUrl': '',
-            'earnedDate': timezone.now().isoformat(),
-            'category': 'milestone'
-        })
-    
-    if completed_courses >= 5:
-        badges.append({
-            'id': '2',
-            'name': 'Learning Enthusiast',
-            'description': 'Completed 5 courses',
-            'imageUrl': '',
-            'earnedDate': timezone.now().isoformat(),
-            'category': 'achievement'
-        })
-    
-    # Get recent activity
-    recent_activity = UserActivity.objects.filter(
-        user=request.user
-    ).order_by('-created_at')[:5]
-    
-    data = {
-        'enrolled_courses': enrolled_courses,
-        'badges': badges,
-        'stats': {
-            'total_courses': total_courses,
-            'completed_courses': completed_courses,
-            'in_progress_courses': in_progress_courses,
-            'total_hours': total_hours,
-            'streak_days': streak_days,
-            'total_points': request.user.extended_profile.points or 0,
-            'completion_rate': round((completed_courses / total_courses * 100), 2) if total_courses > 0 else 0,
-            'leaderboard_rank': None  # Implement leaderboard logic if needed
-        },
-        'recent_activity': UserActivitySerializer(recent_activity, many=True).data
-    }
-    
-    return Response(data)
+        # Calculate total learning hours
+        total_hours = enrollments.aggregate(
+            total=Sum('course__duration')
+        )['total'] or 0
+        total_hours = round(total_hours / 60)
+        
+        # Get streak
+        today = timezone.now().date()
+        streak_days = 0
+        current_date = today
+        while UserActivity.objects.filter(
+            user=request.user,
+            created_at__date=current_date
+        ).exists():
+            streak_days += 1
+            current_date -= timedelta(days=1)
+        
+        # Get enhanced badges
+        badges = get_user_badges(request.user, completed_courses)
+        
+        # Get recent activity
+        recent_activity = UserActivity.objects.filter(
+            user=request.user
+        ).order_by('-created_at')[:5]
+        
+        # Calculate achievement progress
+        achievement_progress = {
+            'next_milestone': 5 if completed_courses < 5 else 10,
+            'courses_to_next': max(0, (5 if completed_courses < 5 else 10) - completed_courses),
+            'progress_percentage': min(100, (completed_courses / (5 if completed_courses < 5 else 10)) * 100)
+        }
+        
+        data = {
+            'enrolled_courses': enrolled_courses,
+            'badges': badges,
+            'achievement_progress': achievement_progress,
+            'stats': {
+                'total_courses': total_courses,
+                'completed_courses': completed_courses,
+                'in_progress_courses': in_progress_courses,
+                'total_hours': total_hours,
+                'streak_days': streak_days,
+                'total_points': request.user.extended_profile.points or 0,
+                'completion_rate': round((completed_courses / total_courses * 100), 2) if total_courses > 0 else 0,
+                'leaderboard_rank': None,
+                'badges_earned': len(badges),
+                'achievement_level': get_achievement_level(completed_courses)
+            },
+            'recent_activity': UserActivitySerializer(recent_activity, many=True).data
+        }
+        
+        return Response(data)
+        
+    except Exception as e:
+        return Response(
+            {'error': f'Internal server error: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+def get_achievement_level(completed_courses):
+    """Get user's achievement level based on completed courses"""
+    if completed_courses >= 10:
+        return {"level": "Master", "title": "🎓 Learning Master", "color": "#FFD700"}
+    elif completed_courses >= 5:
+        return {"level": "Expert", "title": "🌟 Learning Expert", "color": "#9370DB"}
+    elif completed_courses >= 3:
+        return {"level": "Advanced", "title": "⚡ Advanced Learner", "color": "#FF6B6B"}
+    elif completed_courses >= 1:
+        return {"level": "Intermediate", "title": "🔥 Rising Star", "color": "#4ECDC4"}
+    else:
+        return {"level": "Beginner", "title": "🎯 Getting Started", "color": "#95E1D3"}
+
