@@ -1,6 +1,7 @@
 from django.db import models
 from django.core.exceptions import ValidationError
 from django.utils import timezone
+from datetime import timedelta
 from core.models import BaseModel
 from authentication.models import User
 from courses.models import Course, CourseSection, Lecture
@@ -169,27 +170,79 @@ class ContentReleaseSchedule(BaseModel):
     unlock_all = models.BooleanField(default=False)
     days_between_releases = models.PositiveIntegerField(null=True, blank=True)
     release_time = models.TimeField(default='00:00:00')
-    created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='created_schedules')  # Add this field
+    created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='created_schedules')
 
     def __str__(self):
         return f"Release schedule for {self.course.title}"
+    
+    def get_content_availability(self, user, content_object):
+        """
+        Check if content is available for a specific user based on release rules
+        """
+        from courses.models import Lecture, CourseSection
+        
+        # If unlock_all is True, everything is available
+        if self.unlock_all:
+            return True
+            
+        # If self-paced strategy, everything is available
+        if self.strategy == 'self_paced':
+            return True
+        
+        # Determine what type of content we're dealing with
+        if isinstance(content_object, Lecture):
+            # For lectures, check both lecture-specific rules and section-level rules
+            rule = self.rules.filter(
+                models.Q(lecture=content_object) |  # Direct lecture rule
+                models.Q(section=content_object.section, lecture__isnull=True)  # Section rule without specific lecture
+            ).first()
+            
+        elif isinstance(content_object, CourseSection):
+            # For sections, only check section-level rules
+            rule = self.rules.filter(
+                models.Q(section=content_object)
+            ).first()
+            
+        else:
+            # For other content types (like quizzes), handle appropriately
+            rule = self.rules.filter(
+                models.Q(quiz=content_object)
+            ).first()
+        
+        # If no rule found, content is available by default
+        if not rule:
+            return True
+        
+        # Check if the rule allows access
+        return rule.is_content_available(user)
+
 
 class ContentReleaseRule(BaseModel):
-    schedule = models.ForeignKey(ContentReleaseSchedule, on_delete=models.CASCADE, related_name='rules')
-    trigger = models.CharField(max_length=20, choices=[
+    TRIGGER_CHOICES = [
         ('enrollment', 'Upon Enrollment'),
         ('date', 'Specific Date'),
         ('completion', 'After Previous Completion'),
+        ('progress', 'Progress-based'),
         ('manual', 'Manual Release'),
-    ])
+        ('quiz_completion', 'Quiz Completion'),  # New trigger type
+        ('quiz_performance', 'Quiz Performance'),  # New trigger type
+    ]
+    
+    schedule = models.ForeignKey(ContentReleaseSchedule, on_delete=models.CASCADE, related_name='rules')
+    trigger = models.CharField(max_length=20, choices=TRIGGER_CHOICES)
     offset_days = models.PositiveIntegerField(default=0)
     release_date = models.DateTimeField(null=True, blank=True)
     section = models.ForeignKey(CourseSection, on_delete=models.CASCADE, null=True, blank=True)
     lecture = models.ForeignKey(Lecture, on_delete=models.CASCADE, null=True, blank=True)
     quiz = models.ForeignKey('courses.Quiz', on_delete=models.CASCADE, null=True, blank=True)
     is_released = models.BooleanField(default=False)
+    is_manually_unlocked = models.BooleanField(default=False)
+    required_progress_percentage = models.PositiveIntegerField(null=True, blank=True)
+    required_completion_item = models.CharField(max_length=200, null=True, blank=True)
+    required_quiz_score = models.PositiveIntegerField(null=True, blank=True, 
+        help_text="Minimum score percentage required for quiz performance trigger")
     release_event = models.ForeignKey(CalendarEvent, on_delete=models.SET_NULL, null=True, blank=True)
-    created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='created_release_rules')  # Add this field
+    created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='created_release_rules')
 
     class Meta:
         ordering = ['release_date', 'offset_days']
@@ -201,13 +254,140 @@ class ContentReleaseRule(BaseModel):
         
         if self.trigger == 'enrollment' and not self.offset_days:
             raise ValidationError("Offset days is required for enrollment-triggered rules")
-
+        
+        if self.trigger == 'progress' and not self.required_progress_percentage:
+            raise ValidationError("Required progress percentage is required for progress-triggered rules")
+            
+        if self.trigger == 'quiz_completion' and not self.quiz:
+            raise ValidationError("Quiz must be specified for quiz completion trigger")
+            
+        if self.trigger == 'quiz_performance' and not self.quiz:
+            raise ValidationError("Quiz must be specified for quiz performance trigger")
+            
+        if self.trigger == 'quiz_performance' and not self.required_quiz_score:
+            raise ValidationError("Required quiz score is required for quiz performance trigger")
+        
     def __str__(self):
         return f"Release rule for {self.schedule.course.title}"
+    
+    def is_available_for_user(self, user):
+        """
+        Legacy method - kept for backward compatibility
+        """
+        return self.is_content_available(user)
+    
+    def is_content_available(self, user):
+        """
+        Check if content is available for a specific user based on this rule
+        """
+        from django.utils import timezone
+        
+        # Check for student-specific overrides first
+        override = self.student_overrides.filter(student=user).first()
+        if override:
+            return override.is_released
+        
+        # Check rule type and conditions
+        if self.trigger == 'date':
+            # Date-based release
+            if self.release_date:
+                return timezone.now() >= self.release_date
+            return False
+            
+        elif self.trigger == 'progress':
+            # Progress-based release
+            if self.required_progress_percentage:
+                try:
+                    from enrollments.models import CourseProgress
+                    progress = CourseProgress.objects.get(
+                        enrollment__student=user,
+                        enrollment__course=self.schedule.course
+                    )
+                    return progress.overall_progress >= self.required_progress_percentage
+                except (ImportError, CourseProgress.DoesNotExist):
+                    return False
+            return False
+            
+        elif self.trigger == 'completion':
+            # Completion-based release
+            if self.required_completion_item:
+                # Check if user has completed the required item
+                # Implementation depends on your completion tracking system
+                return False
+            return False
+            
+        elif self.trigger == 'enrollment':
+            # Enrollment-based release with offset
+            try:
+                enrollment = user.enrollments.filter(course=self.schedule.course).first()
+                if not enrollment:
+                    return False
+                release_date = enrollment.enrolled_at + timedelta(days=self.offset_days)
+                return timezone.now() >= release_date
+            except AttributeError:
+                return False
+            
+        elif self.trigger == 'manual':
+            # Manual release - check if manually unlocked
+            return self.is_manually_unlocked
+            
+        elif self.trigger == 'quiz_completion':
+            # Quiz completion trigger
+            if not self.quiz:
+                return False
+                
+            try:
+                from courses.models import QuizAttempt
+                # Check if user has completed the quiz
+                return QuizAttempt.objects.filter(
+                    quiz=self.quiz,
+                    user=user,
+                    is_completed=True
+                ).exists()
+            except (ImportError, QuizAttempt.DoesNotExist):
+                return False
+                
+        elif self.trigger == 'quiz_performance':
+            # Quiz performance trigger
+            if not self.quiz or not self.required_quiz_score:
+                return False
+                
+            try:
+                from courses.models import QuizAttempt
+                # Check if user has achieved the required score
+                best_attempt = QuizAttempt.objects.filter(
+                    quiz=self.quiz,
+                    user=user,
+                    is_completed=True
+                ).order_by('-score').first()
+                
+                if best_attempt:
+                    score_percentage = (best_attempt.score / best_attempt.quiz.total_points) * 100
+                    return score_percentage >= self.required_quiz_score
+                return False
+            except (ImportError, QuizAttempt.DoesNotExist):
+                return False
+            
+        # Default to not available if no conditions match
+        return False
+
+
+    @property
+    def prerequisite_lecture(self):
+        return self.lecture or None
+
+    @property
+    def prerequisite_section(self):
+        if self.section:
+            return self.section
+        if self.lecture:
+            return self.lecture.section
+        return None
+
 
 class StudentProgressOverride(BaseModel):
     student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='progress_overrides')
-    rule = models.ForeignKey(ContentReleaseRule, on_delete=models.CASCADE)
+    rule = models.ForeignKey(ContentReleaseRule, on_delete=models.CASCADE, related_name='student_overrides')
     override_date = models.DateTimeField(null=True, blank=True)
     is_released = models.BooleanField(default=False)
     notes = models.TextField(blank=True, null=True)

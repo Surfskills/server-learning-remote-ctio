@@ -87,7 +87,7 @@ class ContentReleaseRuleSerializer(serializers.ModelSerializer):
     quiz = QuizSerializer(read_only=True)
     release_event = CalendarEventSerializer(read_only=True)
     created_by = UserSerializer(read_only=True)  
-    
+    required_quiz_score = serializers.IntegerField(required=False, allow_null=True)
     schedule_id = serializers.UUIDField(write_only=True)
     section_id = serializers.UUIDField(write_only=True, required=False, allow_null=True)
     lecture_id = serializers.UUIDField(write_only=True, required=False, allow_null=True)

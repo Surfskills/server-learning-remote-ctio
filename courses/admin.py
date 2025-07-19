@@ -54,7 +54,10 @@ class CourseAdmin(admin.ModelAdmin):
         'certificate_available', 'lifetime_access', 'created_at'
     ]
     search_fields = ['title', 'description', 'instructor__username', 'instructor__email']
-    prepopulated_fields = {'slug': ('title',)}
+    
+    # Remove slug from prepopulated_fields since it's auto-generated
+    # prepopulated_fields = {'slug': ('title',)}  # REMOVE THIS LINE
+    
     readonly_fields = ['slug', 'students_enrolled', 'review_count', 'created_at', 'updated_at']
     
     fieldsets = (
@@ -128,7 +131,6 @@ class CourseAdmin(admin.ModelAdmin):
         updated = queryset.update(is_active=False)
         self.message_user(request, f'{updated} courses were deactivated.')
     deactivate_courses.short_description = 'Deactivate selected courses'
-
 
 class LectureInline(admin.TabularInline):
     model = Lecture

@@ -6,7 +6,7 @@ from django.db.models import Q
 from django.utils import timezone
 from datetime import timedelta
 from django_filters.rest_framework import DjangoFilterBackend
-
+from django.db import models
 from core.views import BaseModelViewSet
 from .models import (
     CalendarEvent, CalendarNotification, UserCalendarSettings,
@@ -17,7 +17,7 @@ from .serializers import (
     UserCalendarSettingsSerializer, ContentReleaseScheduleSerializer,
     ContentReleaseRuleSerializer, StudentProgressOverrideSerializer
 )
-from courses.models import Course
+from courses.models import Course, CourseSection, Lecture
 from authentication.models import User
 
 class CalendarEventViewSet(BaseModelViewSet):
@@ -138,6 +138,7 @@ class ContentReleaseScheduleViewSet(BaseModelViewSet):
     
     def get_queryset(self):
         course_id = self.request.query_params.get('course_id')
+        course_slug = self.request.query_params.get('course_slug')
         
         # Admin/superuser gets access to all schedules
         if self.request.user.is_staff or self.request.user.is_superuser:
@@ -152,36 +153,54 @@ class ContentReleaseScheduleViewSet(BaseModelViewSet):
         
         queryset = queryset.select_related('course').order_by('created_at')
         
-        # If course_id is provided, filter by it
-        if course_id:
-            queryset = queryset.filter(course_id=course_id)
+        # Handle both course_id and course_slug filtering
+        course_filter = course_id or course_slug
+        if course_filter:
+            # Try to determine if it's a UUID or slug
+            try:
+                import uuid
+                uuid.UUID(str(course_filter))
+                # It's a valid UUID, filter by course_id
+                queryset = queryset.filter(course_id=course_filter)
+            except (ValueError, TypeError):
+                # It's not a valid UUID, treat it as a slug
+                queryset = queryset.filter(course__slug=course_filter)
         
         return queryset
 
-    def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
-
-    def perform_update(self, serializer):
-        # Ensure created_by is set when updating as well
-        if not serializer.instance.created_by:
-            serializer.save(created_by=self.request.user)
-        else:
-            serializer.save()
-
     def create(self, request, *args, **kwargs):
         course_id = request.data.get('course_id')
-        if not course_id:
-            return Response({'error': 'course_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+        course_slug = request.data.get('course_slug')
+        
+        # Handle both course_id and course_slug
+        course_identifier = course_id or course_slug
+        if not course_identifier:
+            return Response({'error': 'course_id or course_slug is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Try to determine if it's a UUID or slug and get the actual course_id
+        try:
+            import uuid
+            uuid.UUID(str(course_identifier))
+            # It's a valid UUID, use it as course_id
+            actual_course_id = course_identifier
+        except (ValueError, TypeError):
+            # It's not a valid UUID, treat it as a slug and get the course_id
+            try:
+                course = Course.objects.get(slug=course_identifier)
+                actual_course_id = course.id
+                request.data['course_id'] = actual_course_id  # Update the request data
+            except Course.DoesNotExist:
+                return Response({'error': 'Course not found'}, status=status.HTTP_404_NOT_FOUND)
         
         try:
             # Check if schedule already exists - but use the same filtering logic
             if self.request.user.is_staff or self.request.user.is_superuser:
                 # Admin can access any schedule
-                schedule = ContentReleaseSchedule.objects.filter(course_id=course_id).first()
+                schedule = ContentReleaseSchedule.objects.filter(course_id=actual_course_id).first()
             else:
                 # Regular users use permission-based filtering
                 schedule = ContentReleaseSchedule.objects.filter(
-                    Q(course_id=course_id) &
+                    Q(course_id=actual_course_id) &
                     (Q(course__instructor=self.request.user) |
                      Q(created_by=self.request.user) |
                      Q(course__enrollments__student=self.request.user))
@@ -196,6 +215,18 @@ class ContentReleaseScheduleViewSet(BaseModelViewSet):
                 return super().create(request, *args, **kwargs)
         except Exception as e:
             return super().create(request, *args, **kwargs)
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+    def perform_update(self, serializer):
+        # Ensure created_by is set when updating as well
+        if not serializer.instance.created_by:
+            serializer.save(created_by=self.request.user)
+        else:
+            serializer.save()
+
+
 
     @action(detail=True, methods=['post'])
     def generate_events(self, request, pk=None):
@@ -321,7 +352,15 @@ class CourseEventsView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        course_id = self.kwargs['course_id']
+        course_slug = self.kwargs['course_slug']  # Changed from course_id to course_slug
+        
+        # First, get the course by slug to get its ID
+        try:
+            course = Course.objects.get(slug=course_slug)  # Assuming Course model has a slug field
+            course_id = course.id
+        except Course.DoesNotExist:
+            # Return empty queryset if course doesn't exist
+            return CalendarEvent.objects.none()
         
         if self.request.user.is_staff or self.request.user.is_superuser:
             # Admin can see all events for the course
@@ -336,3 +375,85 @@ class CourseEventsView(generics.ListAPIView):
             ).distinct()
         
         return queryset.order_by('start_time')
+    
+
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from django.db import models
+from django.shortcuts import get_object_or_404
+from .models import Course, CourseSection, Lecture, ContentReleaseSchedule
+from .serializers import ContentReleaseRuleSerializer
+
+
+@api_view(['GET'])
+def check_content_availability(request, course_id, content_type, content_id):
+    try:
+        # Get the course
+        course = Course.objects.get(id=course_id)
+        
+        # Get the content release schedule
+        try:
+            schedule = ContentReleaseSchedule.objects.get(course=course)
+        except ContentReleaseSchedule.DoesNotExist:
+            return Response({
+                'is_available': True,
+                'rules': [],
+                'reason': 'No release schedule found'
+            })
+        
+        # Get the content object - ensure we get the actual model instance
+        content_object = None
+        if content_type == 'lecture':
+            try:
+                content_object = Lecture.objects.select_related('section').get(id=content_id)
+            except Lecture.DoesNotExist:
+                return Response({
+                    'error': f'Lecture with id {content_id} not found'
+                }, status=404)
+                
+        elif content_type == 'section':
+            try:
+                content_object = CourseSection.objects.get(id=content_id)
+            except CourseSection.DoesNotExist:
+                return Response({
+                    'error': f'Section with id {content_id} not found'
+                }, status=404)
+        else:
+            return Response({
+                'error': 'Invalid content type'
+            }, status=400)
+        
+        # Check availability - pass the actual model instance
+        user = request.user
+        is_available = schedule.get_content_availability(user, content_object)
+        
+        # Get rules - use proper model fields in query
+        rules = schedule.rules.all()
+        if content_type == 'lecture':
+            # Make sure we're using the correct field references
+            rules = rules.filter(
+                models.Q(lecture=content_object) | 
+                models.Q(section=content_object.section, lecture__isnull=True)
+            )
+        else:
+            rules = rules.filter(section=content_object)
+        
+        return Response({
+            'is_available': is_available,
+            'rules': ContentReleaseRuleSerializer(rules, many=True).data,
+            'reason': None if is_available else 'Content is locked'
+        })
+        
+    except Course.DoesNotExist:
+        return Response({
+            'error': f'Course with id {course_id} not found'
+        }, status=404)
+    except Exception as e:
+        # Log the full error for debugging
+        import traceback
+        print(f"Error in check_content_availability: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
+        
+        return Response({
+            'error': str(e)
+        }, status=500)

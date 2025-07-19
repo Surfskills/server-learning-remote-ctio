@@ -148,11 +148,25 @@ class CourseSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'title', 'description', 'level', 'language', 'price',
             'instructor', 'instructor_id', 'category', 'category_id', 'slug',
-    'banner_url', 'preview_video_url', 'duration',
-            'created_at', 'updated_at'
+    'banner_url', 'preview_video_url', 'duration','thumbnail',
+            'what_you_will_learn', 'who_is_this_for',
+            'prerequisites', 'long_description', 'certificate_available',
+            'lifetime_access', 'is_published', 'is_active'
         ]
-        read_only_fields = ['id', 'instructor', 'category', 'banner_url', 'created_at', 'updated_at']
-
+        read_only_fields = ['id', 'instructor', 'category', 'created_at', 'updated_at']
+    def update(self, instance, validated_data):
+        thumbnail = validated_data.pop('thumbnail', None)
+        
+        # Update all other fields
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        
+        # Handle thumbnail if provided
+        if thumbnail:
+            instance.thumbnail = thumbnail
+        
+        instance.save()
+        return instance 
     def create(self, validated_data):
         # Handle thumbnail file upload
         thumbnail = validated_data.pop('thumbnail', None)

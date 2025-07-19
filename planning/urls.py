@@ -1,3 +1,6 @@
+# Make sure your Django URLs are correct
+# In your planning/urls.py file:
+
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from . import views
@@ -12,5 +15,10 @@ router.register(r'progress-overrides', views.StudentProgressOverrideViewSet, bas
 
 urlpatterns = [
     path('', include(router.urls)),
-    path('courses/<uuid:course_id>/events/', views.CourseEventsView.as_view(), name='course-events'),
+    path('courses/<str:course_slug>/events/', views.CourseEventsView.as_view(), name='course-events'),
+    # Make sure this path is exactly like this:
+    path('<uuid:course_id>/content/<str:content_type>/<uuid:content_id>/availability/', 
+        views.check_content_availability, 
+        name='check_content_availability'
+    ),
 ]
