@@ -862,74 +862,106 @@ class InstructorDashboardView(APIView):
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # Get instructor's courses with stats
-        courses = Course.objects.filter(
-            instructor=request.user
-        ).prefetch_related(
-            'enrollments',
-            'orders'
-        ).annotate(
-            total_students=Count('enrollments', distinct=True),
-            active_students=Count(
+        try:
+            # Get total counts using the same approach as admin_stats
+            total_courses = Course.objects.filter(instructor=request.user).count()
+            total_enrollments = Enrollment.objects.filter(course__instructor=request.user).count()
+            
+            print(f"Total enrollments found for instructor: {total_enrollments}")  # Debug log
+            
+            # Get instructor's courses with stats
+            courses = Course.objects.filter(
+                instructor=request.user
+            ).prefetch_related(
                 'enrollments',
-                filter=Q(enrollments__last_accessed__gte=timezone.now()-timedelta(days=30)),
-                distinct=True
-            ),
-            completed_students=Count(
-                'enrollments',
-                filter=Q(enrollments__completed=True),
-                distinct=True
-            ),
-            total_earnings=Sum(
-                'orders__amount',
-                filter=Q(orders__status='paid'),
-                distinct=True
+                'orders'
+            ).annotate(
+                total_students=Count('enrollments', distinct=True),
+                active_students=Count(
+                    'enrollments',
+                    filter=Q(enrollments__last_accessed__gte=timezone.now()-timedelta(days=30)),
+                    distinct=True
+                ),
+                completed_students=Count(
+                    'enrollments',
+                    filter=Q(enrollments__completed=True),
+                    distinct=True
+                ),
+                total_earnings=Sum(
+                    'orders__amount',
+                    filter=Q(orders__status='paid'),
+                    distinct=True
+                )
             )
-        )
 
-        # Debug output (remove in production)
-        print(f"Instructor courses: {courses.count()}")
-        for course in courses:
-            print(f"Course {course.title}: {course.total_students} students")
+            # Debug output (remove in production)
+            print(f"Instructor courses: {courses.count()}")
+            for course in courses:
+                print(f"Course {course.title}: {course.total_students} students")
 
-        # Get recent enrollments
-        recent_enrollments = Enrollment.objects.filter(
-            course__instructor=request.user
-        ).select_related('student', 'course').order_by('-enrolled_at')[:10]
+            # Get recent enrollments (last 7 days) with related data - same as admin_stats
+            seven_days_ago = timezone.now() - timedelta(days=7)
+            recent_enrollments = Enrollment.objects.select_related(
+                'student', 'course'
+            ).filter(
+                course__instructor=request.user,
+                enrolled_at__gte=seven_days_ago
+            ).order_by('-enrolled_at')[:10]
+            
+            print(f"Recent enrollments (7 days) for instructor: {recent_enrollments.count()}")  # Debug log
+            
+            # If no recent enrollments, get the most recent ones regardless of date
+            if not recent_enrollments.exists():
+                recent_enrollments = Enrollment.objects.select_related(
+                    'student', 'course'
+                ).filter(
+                    course__instructor=request.user
+                ).order_by('-enrolled_at')[:10]
+                print(f"All recent enrollments for instructor: {recent_enrollments.count()}")  # Debug log
 
-        # Get course progress stats
-        course_progress = Enrollment.objects.filter(
-            course__instructor=request.user
-        ).values('course__title').annotate(
-            avg_progress=Avg('progress_percentage'),
-            avg_time_spent=Avg('time_spent_minutes')
-        )
+            # Get course progress stats
+            course_progress = Enrollment.objects.filter(
+                course__instructor=request.user
+            ).values('course__title').annotate(
+                avg_progress=Avg('progress_percentage'),
+                avg_time_spent=Avg('time_spent_minutes')
+            )
 
-        # Get earnings data
-        earnings = Order.objects.filter(
-            course__instructor=request.user,
-            status='paid'
-        ).aggregate(
-            total_earnings=Sum('amount'),
-            monthly_earnings=Sum(
-                'amount',
-                filter=Q(completed_at__gte=timezone.now()-timedelta(days=30))
-        ))
+            # Get earnings data
+            earnings = Order.objects.filter(
+                course__instructor=request.user,
+                status='paid'
+            ).aggregate(
+                total_earnings=Sum('amount'),
+                monthly_earnings=Sum(
+                    'amount',
+                    filter=Q(completed_at__gte=timezone.now()-timedelta(days=30))
+            ))
 
-        # Calculate totals
-        totals = {
-            'total_courses': courses.count(),
-            'total_students': sum(course.total_students for course in courses),
-            'active_students': sum(course.active_students for course in courses),
-            'completed_students': sum(course.completed_students for course in courses),
-            'total_earnings': earnings['total_earnings'] or 0,
-            'monthly_earnings': earnings['monthly_earnings'] or 0
-        }
+            # Calculate totals using the same approach as admin_stats
+            totals = {
+                'total_courses': total_courses,  # Direct count like admin_stats
+                'total_enrollments': total_enrollments,  # Direct count like admin_stats
+                'total_students': sum(course.total_students for course in courses),
+                'active_students': sum(course.active_students for course in courses),
+                'completed_students': sum(course.completed_students for course in courses),
+                'total_earnings': earnings['total_earnings'] or 0,
+                'monthly_earnings': earnings['monthly_earnings'] or 0
+            }
 
-        return Response({
-            'totals': totals,
-            'courses': CourseSerializer(courses, many=True).data,
-            'recent_enrollments': EnrollmentSerializer(recent_enrollments, many=True).data,
-            'course_progress': list(course_progress),
-            'earnings': earnings
-        })
+            print(f"Returning instructor stats with {len(recent_enrollments)} recent enrollments")  # Debug log
+
+            return Response({
+                'totals': totals,
+                'courses': CourseSerializer(courses, many=True).data,
+                'recent_enrollments': EnrollmentSerializer(recent_enrollments, many=True).data,
+                'course_progress': list(course_progress),
+                'earnings': earnings
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            print(f"Error in instructor dashboard: {str(e)}")  # Debug log
+            return Response(
+                {'error': f'Failed to fetch instructor dashboard data: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

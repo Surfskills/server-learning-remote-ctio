@@ -94,7 +94,6 @@ class CourseViewSet(BaseModelViewSet, CourseFilterMixin):
         elif self.action in ['enroll', 'update_status', 'reorder_sections']:
             return [IsAuthenticated()]
         return [IsAuthenticated()]
-
     def get_queryset(self):
         queryset = super().filter_queryset(super().get_queryset())
         
@@ -110,15 +109,9 @@ class CourseViewSet(BaseModelViewSet, CourseFilterMixin):
         if self.request.user.user_type == 'INSTRUCTOR':
             return queryset.filter(instructor=self.request.user)
         
-        # Regular users (students) can only see published courses they're enrolled in
-        from enrollments.models import Enrollment
-        enrolled_course_ids = Enrollment.objects.filter(
-            student=self.request.user
-        ).values_list('course_id', flat=True)
-        
-        return queryset.filter(
-            Q(is_published=True) & 
-            (Q(id__in=enrolled_course_ids) | Q(is_public=True)))
+        # Regular users (students) can see all published courses
+        return queryset.filter(is_published=True, is_active=True)
+
 
     def create(self, request, *args, **kwargs):
         print("\n=== INCOMING REQUEST ===")

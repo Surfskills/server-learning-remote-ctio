@@ -26,7 +26,14 @@ class UnifiedAuthView(APIView):
 
     def post(self, request):
         logger.debug(f"Received request data: {request.data}")
-        is_signup = request.data.get('is_signup', False)
+        
+        # Check multiple possible indicators for signup
+        is_signup = (
+            request.data.get('is_signup', False) or 
+            request.data.get('action') == 'register' or
+            'confirm_password' in request.data
+        )
+        
         logger.debug(f"Is this a sign-up request? {is_signup}")
 
         if is_signup:
@@ -82,7 +89,6 @@ class UnifiedAuthView(APIView):
                     'error': 'Sign-in failed',
                     'details': e.detail
                 }, status=400)
-
 
 class LogoutView(APIView):
     permission_classes = [IsAuthenticated]
