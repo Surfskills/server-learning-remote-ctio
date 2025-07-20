@@ -19,7 +19,7 @@ class Enrollment(BaseModel):
         validators=[MinValueValidator(0), MaxValueValidator(100)]
     )
     last_accessed = models.DateTimeField(auto_now=True)
-
+    time_spent_minutes = models.PositiveIntegerField(default=0)
     class Meta:
         unique_together = ['student', 'course']
         ordering = ['-enrolled_at']

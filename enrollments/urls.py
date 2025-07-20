@@ -11,4 +11,5 @@ router.register(r'progress', views.CourseProgressViewSet, basename='progress')
 urlpatterns = [
     path('', include(router.urls)),
     path('student/dashboard/', views.student_dashboard, name='student-dashboard'),
+    path('instructor/dashboard/', views.InstructorDashboardView.as_view(), name='instructor-dashboard'),
 ]

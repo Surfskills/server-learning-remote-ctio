@@ -3,12 +3,14 @@ from rest_framework.response import Response
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.utils import timezone
-
+from rest_framework.views import APIView
+from django.db.models import Avg
 from authentication.models import User
 from courses.models import Course
 from courses.serializers import CourseSerializer
 from enrollments.models import Enrollment
 from enrollments.serializers import CourseProgressSerializer, EnrollmentSerializer
+from payments.models import Order
 from planning.models import CalendarEvent
 from .models import HealthCheck
 from .serializers import HealthCheckSerializer
@@ -216,4 +218,3 @@ def admin_stats(request):
             {'error': f'Failed to fetch admin stats: {str(e)}'}, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
-#

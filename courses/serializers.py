@@ -141,7 +141,11 @@ class CourseSerializer(serializers.ModelSerializer):
     category = CourseCategorySerializer(read_only=True)
     instructor_id = serializers.IntegerField(write_only=True, required=False)  # Make it optional
     category_id = serializers.UUIDField(write_only=True)
- 
+    prerequisites = serializers.PrimaryKeyRelatedField(
+            many=True, 
+            queryset=Course.objects.all(), 
+            required=False
+        )
     
     class Meta:
         model = Course
@@ -157,6 +161,10 @@ class CourseSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         thumbnail = validated_data.pop('thumbnail', None)
         
+        # Handle many-to-many fields separately
+        prerequisites = validated_data.pop('prerequisites', None)
+        # Add other M2M fields as needed
+        
         # Update all other fields
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
@@ -166,10 +174,21 @@ class CourseSerializer(serializers.ModelSerializer):
             instance.thumbnail = thumbnail
         
         instance.save()
-        return instance 
+        
+        # Handle many-to-many relationships
+        if prerequisites is not None:
+            instance.prerequisites.set(prerequisites)
+        
+        return instance
     def create(self, validated_data):
         # Handle thumbnail file upload
         thumbnail = validated_data.pop('thumbnail', None)
+        
+        # Extract many-to-many fields before creating the instance
+        prerequisites = validated_data.pop('prerequisites', None)
+        # Add any other M2M fields you might have, for example:
+        # tags = validated_data.pop('tags', None)
+        # related_courses = validated_data.pop('related_courses', None)
         
         # Get instructor - either from validated_data or from the view
         instructor_id = validated_data.pop('instructor_id', None)
@@ -191,7 +210,7 @@ class CourseSerializer(serializers.ModelSerializer):
         except CourseCategory.DoesNotExist:
             raise serializers.ValidationError({'category_id': 'Category not found'})
         
-        # Create course instance
+        # Create course instance (without M2M fields)
         course = Course.objects.create(
             instructor=instructor,
             category=category,
@@ -202,6 +221,16 @@ class CourseSerializer(serializers.ModelSerializer):
         if thumbnail:
             course.thumbnail = thumbnail
             course.save()
+        
+        # Handle many-to-many relationships after the instance is created
+        if prerequisites is not None:
+            course.prerequisites.set(prerequisites)
+        
+        # Handle other M2M fields if you have them:
+        # if tags is not None:
+        #     course.tags.set(tags)
+        # if related_courses is not None:
+        #     course.related_courses.set(related_courses)
         
         return course
 

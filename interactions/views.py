@@ -13,12 +13,12 @@ from .serializers import (
 )
 from core.views import BaseModelViewSet
 from core.utils import success_response, error_response
-from core.permissions import IsCourseEnrolled
+
 from courses.models import Course
 
 class DiscussionThreadViewSet(BaseModelViewSet):
     serializer_class = DiscussionThreadSerializer
-    permission_classes = [IsAuthenticated, IsCourseEnrolled]
+
     filterset_fields = ['thread_type', 'is_pinned', 'is_closed']
     search_fields = ['title', 'content']
 
@@ -75,7 +75,7 @@ class DiscussionThreadViewSet(BaseModelViewSet):
 
 class ThreadReplyViewSet(BaseModelViewSet):
     serializer_class = ThreadReplySerializer
-    permission_classes = [IsAuthenticated, IsCourseEnrolled]
+
 
     def get_queryset(self):
         thread_id = self.kwargs.get('thread_pk')

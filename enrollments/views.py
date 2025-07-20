@@ -1,6 +1,6 @@
 # enrollments/views.py
 from datetime import datetime, timedelta
-
+from rest_framework.views import APIView
 from django.db.models import Q, Count, Sum
 from django.shortcuts import get_object_or_404
 from django.http import Http404
@@ -10,8 +10,10 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response 
+from core import permissions
 from enrollments.models import Enrollment, CourseProgress
 from courses.models import Course, Lecture
+from payments.models import Order
 from users.models import UserActivity
 from courses.serializers import CourseSerializer
 from users.serializers import UserActivitySerializer
@@ -20,22 +22,89 @@ from .serializers import (
     CourseProgressSerializer,
     EnrollmentCreateSerializer
 )
+from rest_framework.decorators import action
+from django.db.models import Count, Avg, Q, Sum
 from core.views import BaseModelViewSet
 from core.utils import success_response, error_response
-from core.permissions import IsStudent, IsEnrolledStudent
+from core.permissions import (
+    IsStudent, 
+    CanManageEnrollments,
+    CanAccessCourseContent,
+    IsAdminUser as CoreIsAdminUser
+)
+
+
+class IsEnrolledStudent(permissions.BasePermission):
+    """
+    Permission to check if the user is a student enrolled in the course.
+    """
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+            
+        # Admin users have full access
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+            
+        # Must be a student
+        if not request.user.is_student:
+            return False
+            
+        # For enrollment-specific actions
+        enrollment_id = view.kwargs.get('enrollment_id') or view.kwargs.get('pk')
+        if enrollment_id:
+            try:
+                enrollment = Enrollment.objects.get(pk=enrollment_id)
+                return enrollment.student == request.user
+            except Enrollment.DoesNotExist:
+                return False
+                
+        return True
+    
+    def has_object_permission(self, request, view, obj):
+        if not request.user or not request.user.is_authenticated:
+            return False
+            
+        # Admin users have full access
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+            
+        # Get the enrollment from the object
+        enrollment = self._get_enrollment_from_object(obj)
+        if not enrollment:
+            return False
+            
+        return enrollment.student == request.user
+    
+    def _get_enrollment_from_object(self, obj):
+        """Extract enrollment from various object types."""
+        if hasattr(obj, 'student'):  # Direct enrollment object
+            return obj
+        if hasattr(obj, 'enrollment'):  # Objects with enrollment attribute
+            return obj.enrollment
+        return None
 
 
 class EnrollmentViewSet(BaseModelViewSet):
     serializer_class = EnrollmentSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, CanManageEnrollments]
 
     def get_queryset(self):
         queryset = Enrollment.objects.select_related('student', 'course')
         
-        # Regular users only see their own enrollments
-        if not self.request.user.is_staff:
+        # Admin users can see all enrollments
+        if self.request.user.is_staff or self.request.user.is_superuser:
+            return queryset
+        
+        # Instructors can see enrollments in their courses only
+        elif self.request.user.user_type == 'INSTRUCTOR':
+            queryset = queryset.filter(course__instructor=self.request.user)
+        
+        # Students see only their own enrollments
+        else:
             queryset = queryset.filter(student=self.request.user)
 
+        # Apply additional filters after role-based filtering
         # Filter by course_id if provided
         course_id = self.request.query_params.get('course_id')
         if course_id:
@@ -166,19 +235,44 @@ class CourseProgressViewSet(BaseModelViewSet):
     lookup_field = 'enrollment_id'
 
     def get_queryset(self):
-        return CourseProgress.objects.filter(enrollment__student=self.request.user)
+        queryset = CourseProgress.objects.select_related(
+            'enrollment__student',
+            'enrollment__course'
+        )
+        
+        # Admin sees all progress
+        if self.request.user.is_staff:
+            return queryset
+        
+        # Instructors see progress for their courses
+        if self.request.user.user_type == 'INSTRUCTOR':
+            return queryset.filter(
+                enrollment__course__instructor=self.request.user
+            )
+        
+        # Students see only their own progress
+        return queryset.filter(enrollment__student=self.request.user)
 
     def get_object(self):
         """Get progress by enrollment ID"""
         enrollment_id = self.kwargs.get('enrollment_id') or self.kwargs.get('pk')
         
         try:
-            # Get enrollment and ensure user owns it
-            enrollment = get_object_or_404(
-                Enrollment,
-                id=enrollment_id,
-                student=self.request.user
-            )
+            # Get enrollment and ensure user owns it or has permission
+            if self.request.user.is_staff or self.request.user.is_superuser:
+                enrollment = get_object_or_404(Enrollment, id=enrollment_id)
+            elif self.request.user.user_type == 'INSTRUCTOR':
+                enrollment = get_object_or_404(
+                    Enrollment,
+                    id=enrollment_id,
+                    course__instructor=self.request.user
+                )
+            else:
+                enrollment = get_object_or_404(
+                    Enrollment,
+                    id=enrollment_id,
+                    student=self.request.user
+                )
             
             # Get or create progress for this enrollment
             progress, created = CourseProgress.objects.get_or_create(
@@ -211,12 +305,20 @@ class CourseProgressViewSet(BaseModelViewSet):
             # Get enrollment from progress
             enrollment = progress.enrollment
             
-            # Validate enrollment belongs to the user
-            if enrollment.student != request.user:
-                return error_response(
-                    {'error': 'You are not authorized to complete lectures for this enrollment'},
-                    status.HTTP_403_FORBIDDEN
-                )
+            # Validate enrollment belongs to the user (unless admin/instructor)
+            if not self.request.user.is_staff and not self.request.user.is_superuser:
+                if self.request.user.user_type == 'INSTRUCTOR':
+                    if enrollment.course.instructor != self.request.user:
+                        return error_response(
+                            {'error': 'You are not authorized to manage this enrollment'},
+                            status.HTTP_403_FORBIDDEN
+                        )
+                else:
+                    if enrollment.student != self.request.user:
+                        return error_response(
+                            {'error': 'You are not authorized to complete lectures for this enrollment'},
+                            status.HTTP_403_FORBIDDEN
+                        )
 
             # Validate course_id matches enrollment if provided
             if course_id and str(enrollment.course_id) != str(course_id):
@@ -414,7 +516,7 @@ class CourseProgressViewSet(BaseModelViewSet):
 class AdminEnrollmentViewSet(BaseModelViewSet):
     """Admin-only viewset to see all enrollments"""
     serializer_class = EnrollmentSerializer
-    permission_classes = [IsAdminUser]
+    permission_classes = [CoreIsAdminUser]
     queryset = Enrollment.objects.select_related('student', 'course')
     
     def get_queryset(self):
@@ -639,6 +741,7 @@ def get_available_icons():
         'BookOpen',  # Additional option
         'GraduationCap' # Additional option
     ]
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def student_dashboard(request):
@@ -748,3 +851,85 @@ def get_achievement_level(completed_courses):
     else:
         return {"level": "Beginner", "title": "🎯 Getting Started", "color": "#95E1D3"}
 
+class InstructorDashboardView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # First check if the user is actually an instructor
+        if not request.user.user_type == 'INSTRUCTOR':
+            return Response(
+                {'error': 'Only instructors can access this dashboard'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Get instructor's courses with stats
+        courses = Course.objects.filter(
+            instructor=request.user
+        ).prefetch_related(
+            'enrollments',
+            'orders'
+        ).annotate(
+            total_students=Count('enrollments', distinct=True),
+            active_students=Count(
+                'enrollments',
+                filter=Q(enrollments__last_accessed__gte=timezone.now()-timedelta(days=30)),
+                distinct=True
+            ),
+            completed_students=Count(
+                'enrollments',
+                filter=Q(enrollments__completed=True),
+                distinct=True
+            ),
+            total_earnings=Sum(
+                'orders__amount',
+                filter=Q(orders__status='paid'),
+                distinct=True
+            )
+        )
+
+        # Debug output (remove in production)
+        print(f"Instructor courses: {courses.count()}")
+        for course in courses:
+            print(f"Course {course.title}: {course.total_students} students")
+
+        # Get recent enrollments
+        recent_enrollments = Enrollment.objects.filter(
+            course__instructor=request.user
+        ).select_related('student', 'course').order_by('-enrolled_at')[:10]
+
+        # Get course progress stats
+        course_progress = Enrollment.objects.filter(
+            course__instructor=request.user
+        ).values('course__title').annotate(
+            avg_progress=Avg('progress_percentage'),
+            avg_time_spent=Avg('time_spent_minutes')
+        )
+
+        # Get earnings data
+        earnings = Order.objects.filter(
+            course__instructor=request.user,
+            status='paid'
+        ).aggregate(
+            total_earnings=Sum('amount'),
+            monthly_earnings=Sum(
+                'amount',
+                filter=Q(completed_at__gte=timezone.now()-timedelta(days=30))
+        ))
+
+        # Calculate totals
+        totals = {
+            'total_courses': courses.count(),
+            'total_students': sum(course.total_students for course in courses),
+            'active_students': sum(course.active_students for course in courses),
+            'completed_students': sum(course.completed_students for course in courses),
+            'total_earnings': earnings['total_earnings'] or 0,
+            'monthly_earnings': earnings['monthly_earnings'] or 0
+        }
+
+        return Response({
+            'totals': totals,
+            'courses': CourseSerializer(courses, many=True).data,
+            'recent_enrollments': EnrollmentSerializer(recent_enrollments, many=True).data,
+            'course_progress': list(course_progress),
+            'earnings': earnings
+        })
