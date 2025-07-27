@@ -1,4 +1,4 @@
-# templates/views.py - Updated with consistent URL methods
+# templates/views.py - Complete implementation
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -71,7 +71,7 @@ class EbookTemplateViewSet(viewsets.ReadOnlyModelViewSet):
                 )
             
             # Apply the template
-            updated_ebook = TemplateService.apply_template(ebook, template.id)
+            updated_ebook = TemplateService.apply_template(ebook, str(template.id), True)
             
             # Return updated ebook data
             ebook_serializer = EbookProjectSerializer(
@@ -84,6 +84,11 @@ class EbookTemplateViewSet(viewsets.ReadOnlyModelViewSet):
                 'ebook': ebook_serializer.data
             })
             
+        except ValueError as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         except Exception as e:
             return Response(
                 {'error': f'Failed to apply template: {str(e)}'},
@@ -104,9 +109,10 @@ class EbookTemplateViewSet(viewsets.ReadOnlyModelViewSet):
         
         try:
             user_template = TemplateService.duplicate_template(
-                template.id,
+                str(template.id),
                 request.user,
-                new_name
+                new_name,
+                True
             )
             
             serializer = UserTemplateSerializer(
@@ -119,6 +125,11 @@ class EbookTemplateViewSet(viewsets.ReadOnlyModelViewSet):
                 'template': serializer.data
             }, status=status.HTTP_201_CREATED)
             
+        except ValueError as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         except Exception as e:
             return Response(
                 {'error': f'Failed to duplicate template: {str(e)}'},
@@ -136,6 +147,20 @@ class EbookTemplateViewSet(viewsets.ReadOnlyModelViewSet):
         
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
+
+    @action(detail=True, methods=['get'])
+    def preview(self, request, pk=None):
+        """Generate a preview of what this template looks like"""
+        template = self.get_object()
+        
+        try:
+            preview_data = TemplateService.get_template_preview(str(template.id), True)
+            return Response(preview_data)
+        except ValueError as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
     def _can_apply_template_to_ebook(self, ebook, user):
         """Check if user can apply template to ebook"""
@@ -165,6 +190,43 @@ class UserTemplateViewSet(viewsets.ModelViewSet):
         """Set current user when creating template"""
         serializer.save(user=self.request.user)
 
+    def create(self, request, *args, **kwargs):
+        """Create with validation"""
+        serializer = self.get_serializer(data=request.data)
+        
+        if not serializer.is_valid():
+            return Response(
+                serializer.errors,
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Validate template data
+        styles = serializer.validated_data.get('styles', {})
+        structure = serializer.validated_data.get('structure', {})
+        
+        is_valid, errors = TemplateService.validate_template_data(styles, structure)
+        if not is_valid:
+            return Response(
+                {'validation_errors': errors},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # If no styles provided, use defaults
+        if not styles:
+            serializer.validated_data['styles'] = TemplateService.create_default_style_template()
+        
+        if not structure:
+            serializer.validated_data['structure'] = TemplateService.create_default_structure_template()
+        
+        self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
+        
+        return Response(
+            serializer.data, 
+            status=status.HTTP_201_CREATED, 
+            headers=headers
+        )
+
     @action(detail=True, methods=['post'], url_path='apply')
     def apply_to_ebook(self, request, pk=None):
         """Apply user template to an ebook - matches frontend URL: /templates/user/{id}/apply/"""
@@ -193,7 +255,7 @@ class UserTemplateViewSet(viewsets.ModelViewSet):
                 )
             
             # Apply the template
-            updated_ebook = TemplateService.apply_template(ebook, user_template.id)
+            updated_ebook = TemplateService.apply_template(ebook, str(user_template.id), False)
             
             # Return updated ebook data
             ebook_serializer = EbookProjectSerializer(
@@ -206,6 +268,11 @@ class UserTemplateViewSet(viewsets.ModelViewSet):
                 'ebook': ebook_serializer.data
             })
             
+        except ValueError as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         except Exception as e:
             return Response(
                 {'error': f'Failed to apply template: {str(e)}'},
@@ -225,12 +292,11 @@ class UserTemplateViewSet(viewsets.ModelViewSet):
             )
         
         try:
-            new_template = UserTemplate.objects.create(
-                user=request.user,
-                base_template=original_template.base_template,
-                name=new_name,
-                styles=original_template.styles,
-                structure=original_template.structure
+            new_template = TemplateService.duplicate_template(
+                str(original_template.id),
+                request.user,
+                new_name,
+                False
             )
             
             serializer = self.get_serializer(new_template)
@@ -240,6 +306,11 @@ class UserTemplateViewSet(viewsets.ModelViewSet):
                 'template': serializer.data
             }, status=status.HTTP_201_CREATED)
             
+        except ValueError as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         except Exception as e:
             return Response(
                 {'error': f'Failed to duplicate template: {str(e)}'},
@@ -251,26 +322,95 @@ class UserTemplateViewSet(viewsets.ModelViewSet):
         """Get all templates available to the user (system + user templates)"""
         template_type = request.query_params.get('type')
         
-        templates_data = TemplateService.get_templates_for_user(
-            request.user,
-            template_type
+        try:
+            templates_data = TemplateService.get_templates_for_user(
+                request.user,
+                template_type
+            )
+            
+            system_serializer = EbookTemplateSerializer(
+                templates_data['system_templates'],
+                many=True,
+                context={'request': request}
+            )
+            
+            user_serializer = UserTemplateSerializer(
+                templates_data['user_templates'],
+                many=True,
+                context={'request': request}
+            )
+            
+            return Response({
+                'system_templates': system_serializer.data,
+                'user_templates': user_serializer.data
+            })
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to fetch templates: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=True, methods=['patch'])
+    def customize(self, request, pk=None):
+        """Customize a user template's styles and structure"""
+        template = self.get_object()
+        
+        new_styles = request.data.get('styles', {})
+        new_structure = request.data.get('structure', {})
+        
+        # Validate new data
+        current_styles = template.styles or {}
+        current_structure = template.structure or {}
+        
+        # Merge with existing data
+        if new_styles:
+            current_styles.update(new_styles)
+        if new_structure:
+            current_structure.update(new_structure)
+        
+        # Validate merged data
+        is_valid, errors = TemplateService.validate_template_data(
+            current_styles, 
+            current_structure
         )
         
-        system_serializer = EbookTemplateSerializer(
-            templates_data['system_templates'],
-            many=True,
-            context={'request': request}
-        )
+        if not is_valid:
+            return Response(
+                {'validation_errors': errors},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
-        user_serializer = UserTemplateSerializer(
-            templates_data['user_templates'],
-            many=True,
-            context={'request': request}
-        )
+        # Update template
+        template.styles = current_styles
+        template.structure = current_structure
+        template.save()
         
+        serializer = self.get_serializer(template)
         return Response({
-            'system_templates': system_serializer.data,
-            'user_templates': user_serializer.data
+            'message': 'Template customized successfully',
+            'template': serializer.data
+        })
+
+    @action(detail=True, methods=['get'])
+    def preview(self, request, pk=None):
+        """Generate a preview of what this user template looks like"""
+        template = self.get_object()
+        
+        try:
+            preview_data = TemplateService.get_template_preview(str(template.id), False)
+            return Response(preview_data)
+        except ValueError as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    @action(detail=False, methods=['get'])
+    def style_defaults(self, request):
+        """Get default style and structure templates for creating new templates"""
+        return Response({
+            'default_styles': TemplateService.create_default_style_template(),
+            'default_structure': TemplateService.create_default_structure_template()
         })
 
     def _can_apply_template_to_ebook(self, ebook, user):
@@ -279,5 +419,3 @@ class UserTemplateViewSet(viewsets.ModelViewSet):
             ebook.author == user or 
             ebook.ebookcollaborator_set.filter(user=user, can_edit=True).exists()
         )
-    
-#

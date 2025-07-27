@@ -33,7 +33,16 @@ class EbookProject(models.Model):
         through='EbookCollaborator',
         related_name='collaborating_ebooks'
     )
-
+    template_styles = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Applied template styles (typography, colors, layout)"
+    )
+    template_structure = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Applied template structure settings"
+    )
     class Meta:
         ordering = ['-created_at']
         indexes = [

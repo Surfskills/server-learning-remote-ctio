@@ -1,12 +1,15 @@
-# ebooks/views.py - Updated with consistent URL methods
+# ebooks/views.py - Updated with template integration
 from rest_framework import viewsets, status, filters
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.shortcuts import get_object_or_404
 from django.db import models
 from django.http import HttpResponse
 from django_filters.rest_framework import DjangoFilterBackend
+from django.db.models import Count, Q
+from django.utils import timezone
+from datetime import timedelta
 
 from core.permissions import CanExportEbook, CanManageEbooks
 from .models import EbookProject, Chapter, EbookExport, EbookCollaborator
@@ -14,7 +17,9 @@ from .services import EbookExportService
 from .serializers import (
     EbookCollaboratorSerializer,
     EbookProjectSerializer,
+    EbookCreateSerializer,
     ChapterSerializer,
+    EbookExportSerializer,
 )
 
 
@@ -23,7 +28,6 @@ class EbookProjectViewSet(viewsets.ModelViewSet):
     ViewSet for managing ebook projects.
     Provides CRUD operations plus publish and export actions.
     """
-    serializer_class = EbookProjectSerializer
     permission_classes = [IsAuthenticated, CanManageEbooks]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'created_at']
@@ -31,15 +35,24 @@ class EbookProjectViewSet(viewsets.ModelViewSet):
     ordering_fields = ['created_at', 'updated_at', 'title']
     ordering = ['-created_at']
 
+    def get_serializer_class(self):
+        """Use different serializers for create vs other actions"""
+        if self.action == 'create':
+            return EbookCreateSerializer
+        return EbookProjectSerializer
+
     def get_queryset(self):
         """Filter to show only user's ebooks or collaborations"""
         user = self.request.user
         
         return EbookProject.objects.filter(
             models.Q(author=user) |
-            models.Q(ebookcollaborator__user=user)
+            models.Q(ebookcollaborator__user=user),
+            deleted_at__isnull=True
         ).distinct().select_related('author').prefetch_related(
-            'ebookcollaborator_set__user'
+            'ebookcollaborator_set__user',
+            'chapters',
+            'exports'
         )
 
     def perform_create(self, serializer):
@@ -70,6 +83,51 @@ class EbookProjectViewSet(viewsets.ModelViewSet):
             'status': 'published',
             'message': 'Ebook published successfully'
         })
+
+    @action(detail=True, methods=['post'])
+    def apply_template(self, request, pk=None):
+        """Apply a template to this ebook"""
+        ebook = self.get_object()
+        
+        # Check permissions
+        if not self._can_edit_ebook(ebook, request.user):
+            return Response(
+                {'error': 'You do not have permission to edit this ebook'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        template_id = request.data.get('template_id')
+        is_system_template = request.data.get('is_system_template', True)
+        
+        if not template_id:
+            return Response(
+                {'error': 'template_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            from templates.services import TemplateService
+            updated_ebook = TemplateService.apply_template(
+                ebook, 
+                template_id, 
+                is_system_template
+            )
+            
+            serializer = EbookProjectSerializer(
+                updated_ebook,
+                context={'request': request}
+            )
+            
+            return Response({
+                'message': 'Template applied successfully',
+                'ebook': serializer.data
+            })
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to apply template: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated, CanExportEbook])
     def export_pdf(self, request, pk=None):
@@ -134,11 +192,38 @@ class EbookProjectViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+    @action(detail=True, methods=['get'])
+    def exports(self, request, pk=None):
+        """Get all exports for this ebook"""
+        ebook = self.get_object()
+        
+        if not self._can_export(ebook, request.user):
+            return Response(
+                {'error': 'You do not have permission to view exports for this ebook'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        exports = ebook.exports.all().order_by('-generated_at')
+        serializer = EbookExportSerializer(
+            exports, 
+            many=True, 
+            context={'request': request}
+        )
+        
+        return Response(serializer.data)
+
     def _can_export(self, ebook, user):
         """Check if user can export the ebook"""
         return (
             ebook.author == user or 
             ebook.ebookcollaborator_set.filter(user=user, can_export=True).exists()
+        )
+
+    def _can_edit_ebook(self, ebook, user):
+        """Check if user can edit the ebook"""
+        return (
+            ebook.author == user or 
+            ebook.ebookcollaborator_set.filter(user=user, can_edit=True).exists()
         )
 
 
@@ -191,6 +276,41 @@ class ChapterViewSet(viewsets.ModelViewSet):
             raise PermissionError("You don't have permission to delete this chapter")
         instance.delete()
 
+    @action(detail=False, methods=['post'])
+    def reorder(self, request, ebook_pk=None):
+        """Reorder chapters"""
+        ebook = get_object_or_404(EbookProject, pk=ebook_pk)
+        
+        if not self._can_edit_ebook(ebook, request.user):
+            return Response(
+                {'error': "You don't have permission to edit this ebook"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        chapter_orders = request.data.get('chapter_orders', [])
+        
+        try:
+            for item in chapter_orders:
+                chapter_id = item.get('id')
+                new_order = item.get('order')
+                
+                chapter = Chapter.objects.get(id=chapter_id, ebook=ebook)
+                chapter.order = new_order
+                chapter.save()
+            
+            return Response({'message': 'Chapters reordered successfully'})
+            
+        except Chapter.DoesNotExist:
+            return Response(
+                {'error': 'Chapter not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to reorder chapters: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
     def _can_edit_ebook(self, ebook, user):
         """Check if user can edit the ebook"""
         return (
@@ -239,18 +359,6 @@ class EbookCollaboratorViewSet(viewsets.ModelViewSet):
         if instance.ebook.author != self.request.user:
             raise PermissionError("Only the author can manage collaborators")
         instance.delete()
-
-
-
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from django.db.models import Count, Q
-from django.utils import timezone
-from datetime import timedelta
-
-from .models import EbookProject
-from templates.models import EbookTemplate, UserTemplate
 
 
 @api_view(['GET'])
@@ -323,6 +431,9 @@ def dashboard_summary(request):
         total_downloads = sum(export.download_count for export in user_exports)
         
         # ============= TEMPLATE STATISTICS =============
+        
+        # Import here to avoid circular imports
+        from templates.models import EbookTemplate, UserTemplate
         
         # User's custom templates
         user_templates_count = UserTemplate.objects.filter(user=user).count()

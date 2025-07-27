@@ -27,16 +27,19 @@ urlpatterns = [
 ]
 
 # This creates the following URL patterns:
-# NEW: GET     /api/ebooks/dashboard/                   - Dashboard summary
-# 
-# GET/POST    /api/ebooks/ebooks/                      - List/Create ebooks
-# GET/PUT/DELETE /api/ebooks/ebooks/{id}/              - Retrieve/Update/Delete ebook
-# POST        /api/ebooks/ebooks/{id}/publish/         - Publish ebook
-# POST        /api/ebooks/ebooks/{id}/export_pdf/      - Export as PDF
-# POST        /api/ebooks/ebooks/{id}/export_epub/     - Export as EPUB
-# 
-# GET/POST    /api/ebooks/ebooks/{ebook_pk}/chapters/              - List/Create chapters
-# GET/PUT/DELETE /api/ebooks/ebooks/{ebook_pk}/chapters/{id}/      - Manage chapters
-# 
-# GET/POST    /api/ebooks/ebooks/{ebook_pk}/collaborators/         - List/Create collaborators
-# GET/PUT/DELETE /api/ebooks/ebooks/{ebook_pk}/collaborators/{id}/ - Manage collaborators
+# NEW: GET /api/ebooks/dashboard/ - Dashboard summary
+#
+# GET/POST /api/ebooks/ebooks/ - List/Create ebooks
+# GET/PUT/PATCH/DELETE /api/ebooks/ebooks/{id}/ - Retrieve/Update/Delete ebook
+# POST /api/ebooks/ebooks/{id}/publish/ - Publish ebook
+# POST /api/ebooks/ebooks/{id}/apply_template/ - Apply template to ebook
+# POST /api/ebooks/ebooks/{id}/export_pdf/ - Export as PDF
+# POST /api/ebooks/ebooks/{id}/export_epub/ - Export as EPUB
+# GET /api/ebooks/ebooks/{id}/exports/ - Get all exports for ebook
+#
+# GET/POST /api/ebooks/ebooks/{ebook_pk}/chapters/ - List/Create chapters
+# GET/PUT/PATCH/DELETE /api/ebooks/ebooks/{ebook_pk}/chapters/{id}/ - Manage chapters
+# POST /api/ebooks/ebooks/{ebook_pk}/chapters/reorder/ - Reorder chapters
+#
+# GET/POST /api/ebooks/ebooks/{ebook_pk}/collaborators/ - List/Create collaborators
+# GET/PUT/PATCH/DELETE /api/ebooks/ebooks/{ebook_pk}/collaborators/{id}/ - Manage collaborators
