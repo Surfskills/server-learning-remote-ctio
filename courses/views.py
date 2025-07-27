@@ -97,20 +97,19 @@ class CourseViewSet(BaseModelViewSet, CourseFilterMixin):
     def get_queryset(self):
         queryset = super().filter_queryset(super().get_queryset())
         
-        # For public access (non-authenticated users), only show published courses
         if not self.request.user.is_authenticated:
             return queryset.filter(is_published=True, is_active=True)
         
-        # Admin users can see all courses
         if self.request.user.is_staff or self.request.user.is_superuser:
             return queryset
         
-        # Instructors can only see their own courses (published or draft)
         if self.request.user.user_type == 'INSTRUCTOR':
             return queryset.filter(instructor=self.request.user)
         
-        # Regular users (students) can see all published courses
-        return queryset.filter(is_published=True, is_active=True)
+        # Students can see published courses OR courses they're enrolled in
+        published_courses = queryset.filter(is_published=True, is_active=True)
+        enrolled_courses = queryset.filter(enrollments__student=self.request.user)
+        return (published_courses | enrolled_courses).distinct()
 
 
     def create(self, request, *args, **kwargs):

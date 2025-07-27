@@ -397,3 +397,99 @@ class IsStudentOrAdmin(BasePermission):
         if not request.user or not request.user.is_authenticated:
             return False
         return request.user.is_staff or request.user.is_superuser or request.user.is_student
+    
+
+# In your permissions.py file, add these new permissions:
+
+class IsEbookCreatorOrAdmin(BasePermission):
+    """Allows access only to ebook creators or admin users."""
+    def has_permission(self, request, view):
+        return (
+            request.user.is_authenticated and 
+            (request.user.is_ebook_creator or request.user.is_admin)
+        )
+class CanManageEbooks(BasePermission):
+    """Controls who can create and manage ebooks."""
+    def has_permission(self, request, view):
+        if not request.user.is_authenticated:
+            return False
+            
+        # Admin users can always manage ebooks
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+            
+        # Check if user has ebook creator role
+        if hasattr(request.user, 'is_ebook_creator') and request.user.is_ebook_creator:
+            return True
+            
+        # Instructors can manage if ALLOW_INSTRUCTOR_EBOOK_CREATION is True
+        if (hasattr(request.user, 'is_instructor') and 
+            request.user.is_instructor and 
+            getattr(settings, 'ALLOW_INSTRUCTOR_EBOOK_CREATION', False)):
+            return True
+            
+        return False
+    
+    def has_object_permission(self, request, view, obj):
+        # Admins can manage all ebooks
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+            
+        # Ebook creators can manage their own ebooks
+        if (hasattr(request.user, 'is_ebook_creator') and 
+            request.user.is_ebook_creator and 
+            hasattr(obj, 'author')):
+            return obj.author == request.user
+            
+        # Instructors can manage their own ebooks if allowed
+        if (hasattr(request.user, 'is_instructor') and 
+            request.user.is_instructor and 
+            getattr(settings, 'ALLOW_INSTRUCTOR_EBOOK_CREATION', False) and 
+            hasattr(obj, 'author')):
+            return obj.author == request.user
+            
+        return False
+
+class CanExportEbook(BasePermission):
+    """Controls who can export ebooks."""
+    def has_permission(self, request, view):
+        # Same basic permissions as managing ebooks
+        permission = CanManageEbooks()
+        return permission.has_permission(request, view)
+    
+    def has_object_permission(self, request, view, obj):
+        # Check if user can manage the ebook
+        manage_perm = CanManageEbooks()
+        if manage_perm.has_object_permission(request, view, obj):
+            return True
+            
+        # Check if user is a collaborator with export permissions
+        if hasattr(obj, 'ebookcollaborator_set'):
+            return obj.ebookcollaborator_set.filter(
+                user=request.user,
+                can_export=True
+            ).exists()
+            
+        return False
+
+class CanUseTemplates(BasePermission):
+    """Controls who can use and apply templates."""
+    def has_permission(self, request, view):
+        if not request.user.is_authenticated:
+            return False
+            
+        # Admin users can always use templates
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+            
+        # Check if user has ebook creator role
+        if hasattr(request.user, 'is_ebook_creator') and request.user.is_ebook_creator:
+            return True
+            
+        # Instructors can use templates if allowed to create ebooks
+        if (hasattr(request.user, 'is_instructor') and 
+            request.user.is_instructor and 
+            getattr(settings, 'ALLOW_INSTRUCTOR_EBOOK_CREATION', False)):
+            return True
+            
+        return False

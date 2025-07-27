@@ -7,6 +7,7 @@ from authentication.models import User, Profile
 from django.db import transaction
 import threading
 import logging
+from ebooks.models import EbookCollaborator
 
 logger = logging.getLogger(__name__)
 
@@ -185,3 +186,20 @@ def verify_signal_connections():
         logger.info(f"{signal_name} has {len(receivers)} receivers")
         for receiver in receivers:
             logger.debug(f"  - {receiver}")
+
+
+
+@receiver(post_save, sender=User)
+def set_ebook_creator_permissions(sender, instance, created, **kwargs):
+    if created and instance.is_ebook_creator:
+        # Set default permissions for ebook creators
+        for ebook in instance.ebooks.all():
+            EbookCollaborator.objects.get_or_create(
+                ebook=ebook,
+                user=instance,
+                defaults={
+                    'role': EbookCollaborator.Role.AUTHOR,
+                    'can_edit': True,
+                    'can_export': True
+                }
+            )

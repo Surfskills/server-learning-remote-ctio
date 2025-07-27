@@ -13,8 +13,12 @@ class CalendarEvent(BaseModel):
         ('meeting', 'Meeting'),
         ('reminder', 'Reminder'),
         ('deadline', 'Deadline'),
+        ('publishing', 'Publishing'),
+        ('writing', 'Writing'),
+        ('review', 'Review'),
+        ('editing', 'Editing'),
     ]
-    
+
     COURSE_EVENT_TYPES = [
         ('release', 'Content Release'),
         ('live_session', 'Live Session'),

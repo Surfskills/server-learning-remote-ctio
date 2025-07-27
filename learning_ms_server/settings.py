@@ -85,6 +85,8 @@ INSTALLED_APPS = [
     'interactions',
     'payments.apps.PaymentsConfig',
     'planning.apps.PlanningConfig', 
+    'ebooks',
+    'templates',
  
 
 ]

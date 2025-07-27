@@ -43,6 +43,14 @@ class UserManager(BaseUserManager):
     def create_superuser(self, email, password=None, **extra_fields):
         return self.create_admin(email, password, **extra_fields)
 
+    def create_ebook_creator(self, email, password=None, **extra_fields):
+        extra_fields.setdefault("user_type", User.Types.EBOOK_CREATOR)
+        return self.create_user(email, password, **extra_fields)
+
+    def create_premium_member(self, email, password=None, **extra_fields):
+        extra_fields.setdefault("user_type", User.Types.PREMIUM_MEMBER)
+        return self.create_user(email, password, **extra_fields)
+
 
 # ────────────────
 #  User Model
@@ -53,6 +61,8 @@ class User(AbstractBaseUser, PermissionsMixin):
         INSTRUCTOR = "INSTRUCTOR", "Instructor"
         STUDENT = "STUDENT", "Student"
         SUPPORT_AGENT = "SUPPORT_AGENT", "Support Agent"
+        EBOOK_CREATOR = "EBOOK_CREATOR", "Ebook Creator"
+        PREMIUM_MEMBER = "PREMIUM_MEMBER", "Premium Member"
 
     email = models.EmailField(unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -106,6 +116,14 @@ class User(AbstractBaseUser, PermissionsMixin):
     @property
     def is_support_agent(self):
         return self.user_type == self.Types.SUPPORT_AGENT
+    
+    @property
+    def is_ebook_creator(self):
+        return self.user_type == self.Types.EBOOK_CREATOR
+
+    @property
+    def is_premium_member(self):
+        return self.user_type == self.Types.PREMIUM_MEMBER
 
     def calculate_profile_completion(self):
         if not hasattr(_thread_locals, "calculating_completion"):

@@ -58,30 +58,6 @@ class SignInSerializer(serializers.Serializer):
         return attrs
 
 
-class UserSerializer(serializers.ModelSerializer):
-    full_name = serializers.ReadOnlyField()
-    display_name = serializers.ReadOnlyField()
-    profile_completion_percentage = serializers.ReadOnlyField()
-    is_profile_complete = serializers.ReadOnlyField()
-    
-    # Role check properties
-    is_admin = serializers.ReadOnlyField()
-    is_instructor = serializers.ReadOnlyField()
-    is_student = serializers.ReadOnlyField()
-    is_support_agent = serializers.ReadOnlyField()
-    
-    class Meta:
-        model = User
-        fields = [
-            'id', 'email', 'first_name', 'last_name', 'full_name', 'display_name',
-            'user_type', 'is_staff', 'is_active', 'phone_number', 'profile_picture',
-            'profile_completion_percentage', 'is_profile_complete',
-            'is_admin', 'is_instructor', 'is_student', 'is_support_agent',
-            'created_at', 'updated_at'
-        ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
-
-
 class ProfileSerializer(serializers.ModelSerializer):
     name = serializers.ReadOnlyField()
     
@@ -93,6 +69,34 @@ class ProfileSerializer(serializers.ModelSerializer):
                  'created_at', 'updated_at', 'name']
         read_only_fields = ['id', 'name', 'created_at', 'updated_at']
 
+
+class UserSerializer(serializers.ModelSerializer):
+    full_name = serializers.ReadOnlyField()
+    display_name = serializers.ReadOnlyField()
+    profile_completion_percentage = serializers.ReadOnlyField()
+    is_profile_complete = serializers.ReadOnlyField()
+    
+    # Role check properties
+    is_admin = serializers.ReadOnlyField()
+    is_instructor = serializers.ReadOnlyField()
+    is_student = serializers.ReadOnlyField()
+    is_support_agent = serializers.ReadOnlyField()
+    is_ebook_creator = serializers.ReadOnlyField()
+    is_premium_member = serializers.ReadOnlyField()
+    
+    class Meta:
+        model = User
+        fields = [
+            'id', 'email', 'first_name', 'last_name', 'full_name', 'display_name',
+            'user_type', 'is_staff', 'is_active', 'phone_number', 'profile_picture',
+            'profile_completion_percentage', 'is_profile_complete',
+            'is_admin', 'is_instructor', 'is_student', 'is_support_agent',
+            'is_ebook_creator', 'is_premium_member',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
 class InstructorSerializer(serializers.ModelSerializer):
     """Simplified serializer for instructor listings"""
     full_name = serializers.ReadOnlyField()
@@ -102,6 +106,7 @@ class InstructorSerializer(serializers.ModelSerializer):
         model = User
         fields = ['id', 'email', 'full_name', 'profile_picture', 'profile_completion']
         
+
 class UserProfileSerializer(serializers.ModelSerializer):
     """Combined serializer for User and Profile data"""
     profile = ProfileSerializer(read_only=True)
@@ -115,6 +120,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
     is_instructor = serializers.ReadOnlyField()
     is_student = serializers.ReadOnlyField()
     is_support_agent = serializers.ReadOnlyField()
+    is_ebook_creator = serializers.ReadOnlyField()
+    is_premium_member = serializers.ReadOnlyField()
     
     class Meta:
         model = User
@@ -123,9 +130,11 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'user_type', 'is_staff', 'is_active', 'phone_number', 'profile_picture',
             'profile_completion_percentage', 'is_profile_complete',
             'is_admin', 'is_instructor', 'is_student', 'is_support_agent',
+            'is_ebook_creator', 'is_premium_member',
             'profile', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
 
 class CustomTokenVerifySerializer(TokenVerifySerializer):
     """Custom token verify serializer that provides better error messages"""
